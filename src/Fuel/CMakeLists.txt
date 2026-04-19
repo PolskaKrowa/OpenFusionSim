@@ -3,6 +3,7 @@
 
 add_library(fuel STATIC
     Fuel.cpp
+    TritiumCyclePhysics.cpp
 )
 
 target_include_directories(fuel

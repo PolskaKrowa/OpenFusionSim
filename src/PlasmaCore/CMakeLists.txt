@@ -1,11 +1,11 @@
 # src/PlasmaCore/CMakeLists.txt
-# CUDA PIC simulation kernel — GPU-side only.
-# Exposes a thin C++ host wrapper (PlasmaCoreBridge) to the rest of the game.
+# CUDA PIC simulation kernel.
+# constants.cu is the single definition point for all shared __constant__ vars.
 
 cmake_minimum_required(VERSION 3.20)
 
-# ─── CUDA sources ─────────────────────────────────────────────────────────────
 set(PLASMACORE_CUDA_SOURCES
+    constants.cu              # <-- MUST be first: defines all __constant__ symbols
     boris_push.cu
     field_interpolation.cu
     charge_deposit.cu
@@ -17,7 +17,6 @@ set(PLASMACORE_CUDA_SOURCES
     plasmacore.cu
 )
 
-# ─── Host-side bridge (plain C++) ────────────────────────────────────────────
 set(PLASMACORE_CXX_SOURCES
     PlasmaCoreBridge.cpp
 )
@@ -28,8 +27,8 @@ add_library(plasmacore STATIC
 )
 
 target_include_directories(plasmacore
-    PUBLIC  ${FUSIONSIM_INCLUDE_DIR}    # shared include/
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} # types.cuh etc. local to PlasmaCore
+    PUBLIC  ${FUSIONSIM_INCLUDE_DIR}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(plasmacore
@@ -41,6 +40,10 @@ target_link_libraries(plasmacore
         CUDA::cusolver
 )
 
+# Separable compilation is required so that __constant__ symbols defined in
+# constants.cu are visible to kernels in other .cu files at device-link time.
+# Without CUDA_SEPARABLE_COMPILATION=ON, each .cu is compiled as a standalone
+# device binary and the extern __constant__ references would go unresolved.
 set_target_properties(plasmacore PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON

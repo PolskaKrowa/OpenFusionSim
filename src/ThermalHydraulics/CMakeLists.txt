@@ -3,6 +3,7 @@
 
 add_library(thermalhydraulics STATIC
     ThermalHydraulics.cpp
+    MoltenSaltPhysics.cpp
 )
 
 target_include_directories(thermalhydraulics

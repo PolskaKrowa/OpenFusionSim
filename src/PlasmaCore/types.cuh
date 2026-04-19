@@ -1,75 +1,88 @@
 #pragma once
 
+//
+// types.cuh
+// Shared types, structs, and DECLARATIONS of __constant__ variables.
+//
+// __constant__ variables must be DEFINED in exactly one .cu translation unit.
+// All other .cu files that include this header see only `extern __constant__`
+// declarations, preventing the nvlink "multiple definition" error.
+//
+// Definitions live in: constants.cu
+//
+
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <cufft.h>
 
-// ─── Physical Constants ────────────────────────────────────────────────────────
-__constant__ float PC_C        = 2.99792458e8f;   // speed of light [m/s]
-__constant__ float PC_E        = 1.60217663e-19f; // elementary charge [C]
-__constant__ float PC_ME       = 9.10938370e-31f; // electron mass [kg]
-__constant__ float PC_MP       = 1.67262192e-27f; // proton mass [kg]
-__constant__ float PC_MD       = 3.34449439e-27f; // deuteron mass [kg]
-__constant__ float PC_MT       = 5.00735588e-27f; // triton mass [kg]
-__constant__ float PC_EPS0     = 8.85418782e-12f; // vacuum permittivity [F/m]
-__constant__ float PC_MU0      = 1.25663706e-6f;  // vacuum permeability [H/m]
+// ─── Physical Constants (declared here, defined in constants.cu) ───────────────
+extern __constant__ float PC_C;      // speed of light        [m/s]
+extern __constant__ float PC_E;      // elementary charge     [C]
+extern __constant__ float PC_ME;     // electron mass         [kg]
+extern __constant__ float PC_MP;     // proton mass           [kg]
+extern __constant__ float PC_MD;     // deuteron mass         [kg]
+extern __constant__ float PC_MT;     // triton mass           [kg]
+extern __constant__ float PC_EPS0;   // vacuum permittivity   [F/m]
+extern __constant__ float PC_MU0;    // vacuum permeability   [H/m]
 
-// ─── Grid Parameters (stored in constant memory) ──────────────────────────────
+// ─── Grid Parameters (declared here, defined in constants.cu) ─────────────────
 struct GridParams {
     float ox, oy, oz;       // grid origin [m]
     float dx, dy, dz;       // cell spacing [m]
     int   Nx, Ny, Nz;       // cell counts
 };
 
-__constant__ GridParams c_grid;
+extern __constant__ GridParams c_grid;
 
 // ─── Particle Arrays (Structure of Arrays) ────────────────────────────────────
-// pos.w  = macro-particle weight (number of real particles represented)
-// vel.w  = species ID encoded as float (0=electron, 1=deuterium, 2=tritium, 3=alpha)
-// All particle arrays are SoA, NOT AoS, for coalesced access.
+// pos.w  = macro-particle weight
+// vel.w  = species ID encoded as float (0=electron,1=D,2=T,3=alpha)
 struct ParticleArrays {
-    float4* pos;        // [x, y, z, weight]     length N
-    float4* vel;        // [vx, vy, vz, species]  length N
-    int*    cell;       // sorted flat cell index  length N
+    float4* pos;    // [x, y, z, weight]      length N
+    float4* vel;    // [vx, vy, vz, species]  length N
+    int*    cell;   // sorted flat cell index  length N
     int     N;
 };
 
-// ─── Reaction Product (alpha + neutron birth) ─────────────────────────────────
+// ─── Reaction Product ─────────────────────────────────────────────────────────
 struct ReactionProduct {
-    float4 pos;         // birth position [x,y,z,weight]
-    float4 vel_alpha;   // [vx,vy,vz, species=3(alpha)]
-    float4 vel_neutron; // [vx,vy,vz, 0]
-    int    active;      // 1 if slot filled, 0 if empty
+    float4 pos;
+    float4 vel_alpha;
+    float4 vel_neutron;
+    int    active;
 };
 
 // ─── Neutron Particle ─────────────────────────────────────────────────────────
 struct NeutronParticle {
-    float3 pos;         // position [m]
-    float3 dir;         // unit direction vector
-    float  energy_MeV;  // kinetic energy
-    float  weight;      // statistical weight
-    int    alive;       // 0 = terminated/captured
+    float3 pos;
+    float3 dir;
+    float  energy_MeV;
+    float  weight;
+    int    alive;
 };
 
-// ─── Cross-Section / TBR / Heat Deposition Maps ───────────────────────────────
+// ─── Cross-Section / TBR / Heat Maps ─────────────────────────────────────────
 struct XSectionTable {
-    float* sigma;       // total cross-section [m^2] vs energy bin
-    float* E_bins;      // energy bin edges [MeV]
+    float* sigma;
+    float* E_bins;
     int    n_bins;
     int    material_id;
 };
 
 struct TritiumProductionMap {
-    float* tbr_voxel;   // tritium breeding rate per voxel [s^-1]
+    float* tbr_voxel;
     int    Nx, Ny, Nz;
 };
 
 struct HeatDepositionMap {
-    float* q_dot;       // power density [W/m^3] per voxel
+    float* q_dot;
     int    Nx, Ny, Nz;
 };
 
-// ─── Inline grid helpers ───────────────────────────────────────────────────────
+// ─── Sort context forward declaration ────────────────────────────────────────
+struct SortContext;
+
+// ─── Inline grid helpers ──────────────────────────────────────────────────────
 __device__ __forceinline__
 int flatCell(int ix, int iy, int iz, const GridParams& g) {
     return ix + g.Nx * (iy + g.Ny * iz);

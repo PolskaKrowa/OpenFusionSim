@@ -12,7 +12,7 @@ namespace units {
 constexpr double C        = 2.99792458e8;    // speed of light         [m/s]
 constexpr double E_CHARGE = 1.60217663e-19;  // elementary charge      [C]
 constexpr double K_B      = 1.38064852e-23;  // Boltzmann constant     [J/K]
-constexpr double M_E      = 9.10938370e-31;  // electron mass          [kg]
+constexpr double M_ELEC   = 9.10938370e-31;  // electron mass          [kg]
 constexpr double M_P      = 1.67262192e-27;  // proton mass            [kg]
 constexpr double EPS0     = 8.85418782e-12;  // vacuum permittivity    [F/m]
 constexpr double MU0      = 1.25663706e-6;   // vacuum permeability    [H/m]

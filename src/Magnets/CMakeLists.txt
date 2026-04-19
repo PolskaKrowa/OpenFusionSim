@@ -4,6 +4,7 @@
 
 add_library(magnets STATIC
     Magnets.cpp
+    MagnetPhysics.cpp
 )
 
 target_include_directories(magnets

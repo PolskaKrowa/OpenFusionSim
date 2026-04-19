@@ -3,6 +3,7 @@
 
 add_library(steampower STATIC
     SteamPower.cpp
+    SteamCyclePhysics.cpp
 )
 
 target_include_directories(steampower

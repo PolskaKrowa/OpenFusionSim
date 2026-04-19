@@ -3,6 +3,7 @@
 
 add_library(helium STATIC
     Helium.cpp
+    HeliumCoolingPhysics.cpp
 )
 
 target_include_directories(helium
