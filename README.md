@@ -16,7 +16,7 @@ To install OpenFusionSim, follow these steps:
 1. Clone the repository: `git clone https://github.com/PolskaKrowa/OpenFusionSim.git`
 2. Navigate to the project directory: `cd OpenFusionSim`
 3. Build the project using CMake: `cmake -B build && cmake --build -j$(nproc)`
-4. Run the game: `./build/OpenFusionSim`
+4. Run the game: `./build/bin/fusionsim`
 
 ## Contributing
 Contributions to OpenFusionSim are welcome! If you have an idea for a new feature or want to fix a bug, please submit a pull request. Make sure to follow the coding standards and include tests for any new functionality.
