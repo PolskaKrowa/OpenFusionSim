@@ -13,6 +13,19 @@ ThermalHydraulics::ThermalHydraulics(const ThermalHydraulicsConfig& cfg)
     , coolant_outlet_K_(blanket_temp_K_ + 200.0f)
 {}
 
+void ThermalHydraulics::reset()
+{
+    // Mirror the constructor's initial conditions.  Important: don't touch
+    // cfg_ — the config is meant to be set once at construction.
+    blanket_temp_K_    = (cfg_.coolant == CoolantType::FLiBe) ? 700.0f : 573.0f;
+    coolant_inlet_K_   = blanket_temp_K_;
+    coolant_outlet_K_  = blanket_temp_K_ + 200.0f;
+    first_wall_temp_K_ = 300.0f;
+    thermal_power_MW_  = 0.0f;
+    flow_kg_s_         = 0.0f;
+    tbr_current_       = 0.0f;
+}
+
 void ThermalHydraulics::update(ReactorState& state, const SimTime& t)
 {
     float dt = t.dt_s;

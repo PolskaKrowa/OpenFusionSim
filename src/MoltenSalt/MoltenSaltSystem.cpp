@@ -18,6 +18,44 @@ MoltenSaltSystem::MoltenSaltSystem()
     for (auto& p : s_.blanket_circ){ p.auto_start = true; }
 }
 
+void MoltenSaltSystem::reset()
+{
+    // Preserve pump auto_start (it's a config flag) and any operator-set
+    // running/speed — the operator shouldn't have to re-enable every pump
+    // after pressing RESET.  Everything else (tank temps, levels, alarms,
+    // SG heat duty) goes back to the construction defaults.
+    auto save_pump = [](SaltPump& p) {
+        bool was_running    = p.running;
+        float was_speed     = p.speed_frac;
+        bool was_auto       = p.auto_start;
+        p = SaltPump{};
+        p.running    = was_running;
+        p.speed_frac = was_speed;
+        p.auto_start = was_auto;
+    };
+    for (auto& p : s_.hotleg)       save_pump(p);
+    for (auto& p : s_.coldleg)      save_pump(p);
+    for (auto& p : s_.blanket_circ) save_pump(p);
+
+    s_.hot_tank.temp_K   = 860.f;
+    s_.cold_tank.temp_K  = 610.f;
+    s_.hot_tank.level_m  = 8.f;
+    s_.cold_tank.level_m = 8.f;
+    s_.hot_tank.hi_level_alarm  = false;
+    s_.hot_tank.lo_level_alarm  = false;
+    s_.hot_tank.hi_temp_alarm   = false;
+    s_.hot_tank.lo_temp_alarm   = false;
+    s_.cold_tank.hi_level_alarm = false;
+    s_.cold_tank.lo_level_alarm = false;
+    s_.cold_tank.lo_temp_alarm  = false;
+
+    for (int i = 0; i < 4; i++) {
+        s_.sg_heat_MW[i]       = 0.f;
+        s_.sg_salt_inlet_K[i]  = 850.f;
+        s_.sg_salt_outlet_K[i] = 600.f;
+    }
+}
+
 // ─── Hotleg pump flow computation ─────────────────────────────────────────────
 void MoltenSaltSystem::updateHotlegPumps(float dt)
 {
@@ -85,7 +123,8 @@ void MoltenSaltSystem::updateBlanketCirc(float dt, float blanket_heat_MW)
 }
 
 // ─── Distribution and SG heat calculation ────────────────────────────────────
-void MoltenSaltSystem::updateDistribution(float dt)
+void MoltenSaltSystem::updateDistribution(float dt, const float sg_steam_sat_K[4],
+                                           const float sg_demand_factor[4])
 {
     // Group 1&2: hotleg pumps 0 and 1
     float flow_12 = s_.dist_12_enabled
@@ -101,16 +140,31 @@ void MoltenSaltSystem::updateDistribution(float dt)
     flow[2] = flow_34 * s_.dist_3_frac;
     flow[3] = flow_34 * (1.f - s_.dist_3_frac);
 
-    // Each SG: hot salt cools from hot_tank temp to some outlet temp
-    // Outlet temperature set by SG duty (simplified: fixed approach to steam temp)
+    // Each SG is a heat exchanger: heat transfer is limited by BOTH sides.
+    //  - Salt side sets an upper bound on how much heat *could* be given up:
+    //    the salt can't be cooled below the steam-side saturation
+    //    temperature plus a pinch-point approach (2nd law).
+    //  - Steam side sets how much of that potential heat can actually be
+    //    *carried away* right now (sgDemandFactor: turbine load, bypass,
+    //    relief venting). If the secondary side can't take steam, the salt
+    //    passes through nearly unchanged and the primary loop heats up
+    //    instead — this is what makes turbine availability matter for the
+    //    molten salt loop, rather than the SG always cooling by a fixed ΔT.
+    constexpr float APPROACH_K = 30.f; // minimum pinch-point approach temp
+
     for (int i = 0; i < 4; i++) {
         s_.sg_salt_inlet_K[i] = s_.hot_tank.temp_K;
-        // SG outlet: cooled by ~200 K when at full flow (approach to steam saturation)
-        float T_steam  = 560.f; // K ~18 MPa sat temp approximation
-        float approach = 30.f;  // minimum approach temp
-        float T_out    = (flow[i] > 10.f)
-                       ? std::max(T_steam + approach, s_.hot_tank.temp_K - 220.f)
-                       : s_.hot_tank.temp_K; // no cooling if no flow
+
+        float T_min   = sg_steam_sat_K[i] + APPROACH_K; // can't cool below this
+        float demand  = std::clamp(sg_demand_factor[i], 0.f, 1.f);
+
+        float T_out;
+        if (flow[i] > 10.f) {
+            float coolable = std::max(s_.hot_tank.temp_K - T_min, 0.f);
+            T_out = s_.hot_tank.temp_K - demand * coolable;
+        } else {
+            T_out = s_.hot_tank.temp_K; // no flow, no cooling
+        }
         s_.sg_salt_outlet_K[i] = T_out;
 
         // Heat transferred [MW] = ṁ * cp * ΔT
@@ -157,13 +211,15 @@ void MoltenSaltSystem::checkAlarms()
 
 // ─── Main update ─────────────────────────────────────────────────────────────
 void MoltenSaltSystem::update(ReactorState& state, const SimTime& t,
-                               float blanket_heat_MW)
+                               float blanket_heat_MW,
+                               const float sg_steam_sat_K[4],
+                               const float sg_demand_factor[4])
 {
     float dt = t.dt_s;
     updateBlanketCirc(dt, blanket_heat_MW);
     updateHotlegPumps(dt);
     updateColdlegPumps(dt);
-    updateDistribution(dt);
+    updateDistribution(dt, sg_steam_sat_K, sg_demand_factor);
     checkAlarms();
 
     // Write to ReactorState summary

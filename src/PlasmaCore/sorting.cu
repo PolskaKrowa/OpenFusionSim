@@ -75,20 +75,8 @@ __global__ void countParticlesPerCell(
     atomicAdd(&cell_counts[cell_ids[pid]], 1);
 }
 
-// ─── SortContext: scratch memory for CUB ──────────────────────────────────────
-struct SortContext {
-    void*  cub_temp   = nullptr;
-    size_t cub_bytes  = 0;
-    int*   cell_ids   = nullptr;    // [N] particle cell keys (primary)
-    int*   cell_ids_alt = nullptr;  // [N] double-buffer
-    int*   perm       = nullptr;    // [N] sort permutation
-    int*   perm_alt   = nullptr;    // [N] double-buffer
-    float4* pos_tmp   = nullptr;    // [N] temporary for permute
-    float4* vel_tmp   = nullptr;    // [N] temporary for permute
-    int*   counts     = nullptr;    // [N_cells] particles per cell
-    int    N_cells    = 0;
-    int    N_max      = 0;
-};
+// ─── SortContext is now defined in types.cuh (shared across all .cu files) ────
+//  (Previously defined here AND in pic_bridge.cu — an ODR violation.)
 
 // ─── Allocate sort scratch memory ────────────────────────────────────────────
 void allocSortContext(SortContext& ctx, int N, int N_cells)

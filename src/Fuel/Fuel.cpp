@@ -12,6 +12,17 @@ FuelSystem::FuelSystem(const FuelConfig& cfg)
     , T_inventory_g_(cfg.initial_T_g)
 {}
 
+void FuelSystem::reset()
+{
+    D_inventory_g_  = cfg_.initial_D_g;
+    T_inventory_g_  = cfg_.initial_T_g;
+    pellet_timer_s_ = 0.0f;
+    D_consumed_g_   = 0.0f;
+    T_consumed_g_   = 0.0f;
+    N_He_ash_       = 0.0f;
+    N_impurity_     = 0.0f;
+}
+
 void FuelSystem::update(ReactorState& state, const SimTime& t)
 {
     float dt = t.dt_s;
@@ -19,10 +30,22 @@ void FuelSystem::update(ReactorState& state, const SimTime& t)
     // Warn if tritium is low (game mechanic: T takes time to breed/import)
     state.alarm_low_tritium = (T_inventory_g_ < 10.0f);
 
+    // ── Tritium recovery from TES (Tritium Extraction System) ───────────────
+    //  Round 4: the TritiumPlant module writes the T recovery rate to
+    //  state.tritium_recovery_rate_g_s.  We consume it here by adding the
+    //  recovered T to the fuel store.  This closes the fuel cycle: blanket
+    //  breeds T → TES extracts it → fuel store gets topped up → plasma
+    //  burns it → ash exhausts to divertor.
+    if (state.tritium_recovery_rate_g_s > 0.f) {
+        float recovered = state.tritium_recovery_rate_g_s * dt;
+        resupplyTritium(recovered);
+    }
+
     runGasPuffing    (state, dt);
     runPelletInjector(state, dt);
     accountBurnup    (state, dt);
     accountRecycling (state, dt);
+    accountExhaust   (state, dt);
 
     // Write inventory to state for UI / other modules
     state.fuel_D_inventory_g = D_inventory_g_;
@@ -101,6 +124,12 @@ void FuelSystem::accountBurnup(ReactorState& state, float dt)
     T_inventory_g_ -= T_burned_g;
     D_consumed_g_  += D_burned_g;
     T_consumed_g_  += T_burned_g;
+
+    // Every D-T reaction produces exactly one He-4 ash particle.
+    // E_fusion = 17.59 MeV/reaction -> reactions/s = P_fus[MW]*1e6 / (17.59MeV in J)
+    constexpr float E_fusion_J = 17.59e6f * 1.602176634e-19f;
+    float reactions_per_s = (state.fusion_power_MW * 1.0e6f) / E_fusion_J;
+    N_He_ash_ += reactions_per_s * dt;
 }
 
 void FuelSystem::accountRecycling(ReactorState& state, float dt)
@@ -121,4 +150,50 @@ void FuelSystem::resupplyDeuterium(float grams)
 void FuelSystem::resupplyTritium(float grams)
 {
     T_inventory_g_ = std::min(T_inventory_g_ + grams, cfg_.max_T_inventory_g);
+}
+
+void FuelSystem::accountExhaust(ReactorState& state, float dt)
+{
+    // ── Impurity ("junk") production from divertor/wall sputtering ───────────
+    // Roughly proportional to the heat load the divertor is taking.
+    float P_div_safe = std::isfinite(state.divertor_power_MW) ? state.divertor_power_MW : 0.0f;
+    float imp_produced_g = cfg_.sputter_yield_g_per_MWs
+                          * P_div_safe * dt;
+    N_impurity_ += imp_produced_g * 1e-3f / cfg_.m_imp_kg;
+
+    // ── Cryopump / divertor pumping removes He ash, impurities and some D/T ──
+    // Pumping speed [L/s] -> volumetric removal fraction per second.
+    // V_plasma is in m^3 = 1000 L.
+    float V_L = cfg_.plasma_volume_m3 * 1000.0f;
+    float pump_Ls = (state.plasma_status != PlasmaStatus::Cold)
+                   ? cfg_.default_pump_speed_Ls : 0.0f;
+    state.exhaust_pumping_Ls = pump_Ls;
+
+    float removal_frac = std::clamp((pump_Ls / V_L) * dt, 0.0f, 1.0f);
+    N_He_ash_   -= N_He_ash_   * removal_frac;
+    N_impurity_ -= N_impurity_ * removal_frac;
+    N_He_ash_    = std::max(N_He_ash_,   0.0f);
+    N_impurity_  = std::max(N_impurity_, 0.0f);
+
+    // ── Total ion inventory in the vessel from the bulk density ──────────────
+    //  Guard: if plasma_density_m3 is non-finite (shouldn't happen after
+    //  the power-balance guards, but just in case), use 1.0f as the floor
+    //  so the divisions below produce 0 rather than NaN.
+    float ne_safe = std::isfinite(state.plasma_density_m3) ? state.plasma_density_m3 : 0.0f;
+    float N_total = std::max(ne_safe * cfg_.plasma_volume_m3, 1.0f);
+
+    state.helium_fraction   = std::clamp(N_He_ash_   / N_total, 0.0f, 0.9f);
+    state.impurity_fraction = std::clamp(N_impurity_ / N_total, 0.0f, 0.5f);
+
+    float f_DT = std::max(1.0f - state.helium_fraction - state.impurity_fraction, 0.0f);
+    float f_D  = f_DT * (state.D_T_ratio / (1.0f + state.D_T_ratio));
+    float f_T  = f_DT * (1.0f / (1.0f + state.D_T_ratio));
+
+    constexpr float m_D_kg = 3.34449439e-27f;
+    constexpr float m_T_kg = 5.00735588e-27f;
+
+    state.vessel_D_g        = N_total * f_D                       * m_D_kg       * 1e3f;
+    state.vessel_T_g        = N_total * f_T                       * m_T_kg       * 1e3f;
+    state.vessel_He_g       = N_total * state.helium_fraction     * cfg_.m_He_kg * 1e3f;
+    state.vessel_impurity_g = N_total * state.impurity_fraction   * cfg_.m_imp_kg* 1e3f;
 }

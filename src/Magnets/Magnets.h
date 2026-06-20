@@ -50,6 +50,24 @@ public:
     // Manually trigger an emergency dump (called by Control on SCRAM)
     void triggerQuenchDump();
 
+    // Clear the latched quench-dump flag WITHOUT resetting coil currents
+    // or temperatures.  This is what the SCRAM popup's ACKNOWLEDGE button
+    // needs to call: once the QPS has fired and the energy dump is
+    // complete, the quench_detected flag stays latched forever (it's
+    // only cleared by reset()).  But ACKNOWLEDGE is meant to let the
+    // operator resume operation without a full cold restart — so we
+    // need to clear just the quench latch, not the entire magnet state.
+    //
+    // Also clears the per-coil quenched flags so the coils can carry
+    // current again.
+    void clearQuenchLatch();
+
+    // Cold-restart: clear all internal coil state, quench flags and the dump
+    // latch.  Without this, the dump_triggered_ flag from a previous SCRAM
+    // keeps state.quench_detected=true forever and the control system
+    // re-trips SCRAM on the very next tick (classic soft-lock).
+    void reset();
+
     const MagnetConfig& config() const { return cfg_; }
 
 private:

@@ -48,6 +48,13 @@ public:
 
     void update(ReactorState& state, const SimTime& t);
 
+    // Cold-restart: drop blanket/first-wall/coolant temperatures back to
+    // their construction defaults.  Without this, a SCRAM fired while the
+    // blanket is hot leaves blanket_temp_K_ high across the reset, and the
+    // very first update() after RESET writes that hot temperature back into
+    // state.first_wall_temp_K / state.thermal_runaway — re-tripping SCRAM.
+    void reset();
+
     float outletTemp()    const { return coolant_outlet_K_; }
     float thermalPowerMW()const { return thermal_power_MW_; }
 

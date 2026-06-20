@@ -85,6 +85,13 @@ public:
 
     void update(ReactorState& state, const SimTime& t);
 
+    // Cold-restart: restore the reactor/cryostat/magnet circuit state to
+    // its construction defaults (warm He pumps off, cryostat vacuum at
+    // 1e-4 Pa, cold mass at 4.5 K, etc.).  Without this, a SCRAM caused
+    // by e.g. cryo failure leaves the failed state across the reset and
+    // the operator can't actually do a clean cold restart.
+    void reset();
+
     const HeliumSystemState& heState() const { return s_; }
     HeliumSystemState&       heState()       { return s_; }
 

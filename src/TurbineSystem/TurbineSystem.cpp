@@ -8,6 +8,43 @@ TurbineSystem::TurbineSystem()
              TurbineUnitController{3}, TurbineUnitController{4}}
 {}
 
+void TurbineSystem::reset()
+{
+    // Reconstruct each TurbineUnitController in place, preserving only the
+    // operator-set per-pump running/speed flags (which are configuration,
+    // not transient physics).  Without this, a SCRAM followed by RESET
+    // leaves the turbines in Tripped state with their trip latches set,
+    // and the operator would have to cmdReset each one individually.
+    for (int i = 0; i < 4; i++) {
+        // Save operator pump settings (running + speed_frac per FW pump)
+        bool  fw_running[2]  = {units_[i].s.fw_pump[0].running,
+                                 units_[i].s.fw_pump[1].running};
+        float fw_speed[2]    = {units_[i].s.fw_pump[0].speed_frac,
+                                 units_[i].s.fw_pump[1].speed_frac};
+        bool  ph_enabled[4]  = {units_[i].s.preheater[0].enabled,
+                                 units_[i].s.preheater[1].enabled,
+                                 units_[i].s.preheater[2].enabled,
+                                 units_[i].s.preheater[3].enabled};
+        bool  car_pump[4]    = {units_[i].s.condenser.car_pump[0],
+                                 units_[i].s.condenser.car_pump[1],
+                                 units_[i].s.condenser.car_pump[2],
+                                 units_[i].s.condenser.car_pump[3]};
+
+        // Rebuild from scratch
+        units_[i] = TurbineUnitController(i + 1);
+
+        // Restore operator-set flags
+        for (int k = 0; k < 2; k++) {
+            units_[i].s.fw_pump[k].running    = fw_running[k];
+            units_[i].s.fw_pump[k].speed_frac = fw_speed[k];
+        }
+        for (int k = 0; k < 4; k++) {
+            units_[i].s.preheater[k].enabled   = ph_enabled[k];
+            units_[i].s.condenser.car_pump[k]  = car_pump[k];
+        }
+    }
+}
+
 void TurbineSystem::update(ReactorState& state, const SimTime& t,
                             float grid_frequency_Hz,
                             const float salt_heat_MW[4])

@@ -70,8 +70,30 @@ class MoltenSaltSystem {
 public:
     MoltenSaltSystem();
 
-    // blanket_heat_MW = heat produced in blanket this tick (from ThermalHydraulics)
-    void update(ReactorState& state, const SimTime& t, float blanket_heat_MW);
+    // blanket_heat_MW    = heat produced in blanket this tick (from ThermalHydraulics)
+    // sg_steam_sat_K[4]  = saturation temperature of each SG's steam side [K]
+    //                      (sets the pinch-point limit on how cold the salt
+    //                      leaving that SG can get)
+    // sg_demand_factor[4]= 0–1, how much of each SG's potential heat output
+    //                      the secondary side can currently carry away
+    //                      (TurbineUnitController::sgDemandFactor(), one tick
+    //                      delayed — see main loop ordering)
+    //
+    // This is the salt/steam coupling: a steam generator is a heat
+    // exchanger, and heat transfer is limited by BOTH sides. If the
+    // turbine/bypass/relief on the steam side can't absorb heat (e.g.
+    // turbine offline), the salt passes through largely unchanged and the
+    // primary loop heats up instead of the SG cooling at a fixed rate
+    // regardless of demand.
+    void update(ReactorState& state, const SimTime& t, float blanket_heat_MW,
+                const float sg_steam_sat_K[4], const float sg_demand_factor[4]);
+
+    // Cold-restart: rebuild the salt state in place (tanks, pumps, alarms,
+    // SG inlet/outlet temps) but keep the operator's pump enable/speed
+    // settings — those are part of the plant configuration, not transient
+    // state.  Required for RESET — COLD RESTART to actually deliver a
+    // clean slate.
+    void reset();
 
     const MoltenSaltState& saltState() const { return s_; }
     MoltenSaltState&       saltState()       { return s_; }
@@ -83,7 +105,8 @@ private:
     void updateHotlegPumps(float dt);
     void updateColdlegPumps(float dt);
     void updateBlanketCirc(float dt, float blanket_heat_MW);
-    void updateDistribution(float dt);
+    void updateDistribution(float dt, const float sg_steam_sat_K[4],
+                             const float sg_demand_factor[4]);
     void updateTankTemps(float dt);
     void checkAlarms();
 

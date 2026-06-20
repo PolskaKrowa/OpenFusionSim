@@ -41,6 +41,12 @@ public:
 
     void update(ReactorState& state, const SimTime& t);
 
+    // Cold-restart: clear He ash fraction, divertor tile temperature and
+    // pump state.  Otherwise the divertor_temp_K_ from the previous run
+    // (which may have been >2200 K, the SCRAM threshold) survives the
+    // ReactorState wipe and re-trips the SCRAM on the next tick.
+    void reset();
+
     float heFraction() const { return he_fraction_; }
 
 private:

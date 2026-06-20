@@ -10,6 +10,14 @@ HeliumSystem::HeliumSystem(const HeliumConfig& cfg)
     : cfg_(cfg), divertor_temp_K_(300.0f)
 {}
 
+void HeliumSystem::reset()
+{
+    he_fraction_      = 0.0f;
+    divertor_temp_K_  = 300.0f;
+    seed_rate_        = 0.0f;
+    pump_throughput_  = 0.0f;
+}
+
 void HeliumSystem::update(ReactorState& state, const SimTime& t)
 {
     float dt = t.dt_s;
@@ -59,6 +67,14 @@ void HeliumSystem::updateAshAccumulation(ReactorState& state, float dt)
 
 void HeliumSystem::updatePumping(ReactorState& state, float dt)
 {
+    // Guard: if plasma state is non-finite (shouldn't happen after the
+    // power-balance guards, but belt-and-suspenders), skip the update
+    // rather than producing NaN in edge_pressure_Pa / pump_throughput_.
+    if (!std::isfinite(state.plasma_density_m3) ||
+        !std::isfinite(state.plasma_temp_keV)) {
+        return;
+    }
+
     // Divertor pumping removes He + D/T from the scrape-off layer
     // Throughput ~ pump_speed * edge_pressure
     float edge_pressure_Pa = state.plasma_density_m3 * 1.38e-23f
@@ -79,8 +95,19 @@ void HeliumSystem::updatePumping(ReactorState& state, float dt)
 void HeliumSystem::updateDivertorThermal(ReactorState& state, float dt)
 {
     // Power to divertor ≈ P_rad + power not captured by blanket
-    // Simplified: ~15 % of total fusion power goes to divertor
-    float P_div = state.fusion_power_MW * 0.15f + state.radiated_power_MW * 0.5f;
+    // Realistic ITER-like split: ~5 % of total fusion power hits the divertor
+    // (alpha + neutral beam shine-through + charge-exchange), and ~50 % of
+    // the *radiated* power reaches the divertor (the other 50 % is
+    // deposited on the first wall).
+    //
+    // IMPORTANT: do NOT overwrite state.radiated_power_MW here.  That field
+    // is owned by PlasmaCoreBridge (brem + sync + line radiation, computed
+    // from local n_e/T_e/B per cell).  Overwriting it with `P_seeded + 3 %
+    // of P_fus` discards the bridge's value and creates a runaway feedback
+    // loop: high radiation → hot divertor → high seed_rate → "radiated" goes
+    // up → hotter divertor → ... which was the second half of the
+    // spurious-overtemperature-SCRAM bug.
+    float P_div = state.fusion_power_MW * 0.05f + state.radiated_power_MW * 0.5f;
 
     // Impurity seeding radiates some of this before hitting the tile
     // Real control: inject Ar/Ne to keep tile below limit
@@ -104,5 +131,5 @@ void HeliumSystem::updateDivertorThermal(ReactorState& state, float dt)
     divertor_temp_K_  = std::max(divertor_temp_K_, T_coolant);
 
     state.divertor_power_MW = P_tile_MW;
-    state.radiated_power_MW = P_seeded_MW + state.fusion_power_MW * 0.03f; // Bremss
+    // Note: state.radiated_power_MW is NOT touched here.  The bridge owns it.
 }

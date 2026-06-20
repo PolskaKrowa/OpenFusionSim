@@ -29,6 +29,19 @@ ElectricalGridSystem::ElectricalGridSystem()
     }};
 }
 
+void ElectricalGridSystem::reset()
+{
+    // Preserve site-load energisation (operator config) but wipe everything
+    // else: grid frequency, alarms, generator bus state, LOOP flag.
+    bool saved_energised[12];
+    for (int i = 0; i < 12; i++)
+        saved_energised[i] = site_loads_[i].energised;
+
+    grid_ = GridState{};
+    for (int i = 0; i < 12; i++)
+        site_loads_[i].energised = saved_energised[i];
+}
+
 void ElectricalGridSystem::update(ReactorState& state, const SimTime& t,
                                    const TurbineSystem& turbines)
 {

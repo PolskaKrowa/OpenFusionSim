@@ -54,6 +54,11 @@ public:
     void update(ReactorState& state, const SimTime& t,
                 const struct TurbineSystem& turbines);
 
+    // Cold-restart: grid frequency back to 50 Hz, all breakers open, all
+    // alarms cleared.  Site-load energisation flags are operator config
+    // and are preserved.
+    void reset();
+
     const GridState& grid() const { return grid_; }
     GridState&       grid()       { return grid_; }
 

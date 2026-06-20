@@ -101,6 +101,72 @@ PermeationResult tritiumPermeation(float p_upstream_Pa,    // T₂ partial press
                                     float area_m2,         // total permeation area [m²]
                                     WallMaterial material);
 
+// ─── tritiumPermeationTwoRegime ───────────────────────────────────────────────
+//
+//  Two-regime permeation model, distinguishing:
+//    (a) Diffusion-limited (Sieverts, low pressure, atomic H):
+//          J = P_s(T) · (√p_up - √p_down) / L
+//        Valid when surface recombination is fast compared to bulk diffusion.
+//    (b) Recombination-limited (high pressure, oxidized surfaces):
+//          J = k_r(T) · C_surf²   where  C_surf = K_S(T) · √p
+//        Valid for surfaces with oxide layers (which act as T barriers).
+//
+//  The function selects the regime based on a transition parameter
+//  (ratio of characteristic times: τ_diff = L²/D, τ_rec = 1/(k_r · C_surf)).
+//  Below 500 °C with oxidized surfaces, regime (b) dominates and reduces
+//  permeation by 10²-10⁴× (which is why Al₂O₃ / Er₂O₃ barriers work).
+//
+//  Also includes a barrier transmission factor (0-1) for coated walls.
+//
+//  References:
+//    [1] Causey, J. Nucl. Mater. 300, 91 (2002) — T permeation in fusion.
+//    [2] Forcey, J. Nucl. Mater. 160, 117 (1988) — SS316L permeability.
+//    [3] Frauenfelder, J. Vac. Sci. Technol. 6, 388 (1969) — W permeability.
+//
+struct TwoRegimePermeationResult {
+    float flux_mol_m2s;             // total flux through the wall [mol/(m²·s)]
+    float J_diffusion_limited;      // what regime (a) would give
+    float J_recombination_limited;  // what regime (b) would give
+    bool  regime_is_diffusion;      // true=(a), false=(b)
+    float barrier_factor;           // 0-1 (1 = no barrier)
+    float total_loss_mol_s;
+    float total_loss_Bq;
+};
+
+TwoRegimePermeationResult tritiumPermeationTwoRegime(
+    float p_upstream_Pa,
+    float p_downstream_Pa,
+    float T_wall_K,
+    float thickness_m,
+    float area_m2,
+    WallMaterial material,
+    float barrier_factor = 1.0f,        // 1.0 = no barrier; 1e-3 = Al₂O₃ coated
+    bool  surface_oxidized = false);     // oxidized → recombination-limited
+
+// ─── TBR self-sufficiency target ──────────────────────────────────────────────
+//
+//  Post-2020 consensus (Abdou 2021, Fusion Eng. Des. 167, 112374):
+//    TBR_design ≥ 1.10   (replaces the old 1.05 floor)
+//  This accounts for:
+//    - 12.3-year tritium decay (~5.5%/yr loss)
+//    - Permeation losses through piping (~2-3%)
+//    - Hold-up inventory in the breeder and ISS (~3-5%)
+//    - Measurement uncertainty (~3%)
+//
+//  Net TBR = breeding_rate / burn_rate  must exceed this for self-sufficiency.
+//  For P_fus = 3 GWth, burn rate ≈ 1.7×10²⁰ T/s.
+//
+struct TBRResult {
+    float tbr_calculated;        // TBR from blanket physics
+    float tbr_required;          // ≥ 1.10
+    bool  self_sufficient;       // TBR_calc ≥ TBR_req
+    float doubling_time_yr;      // time to double the start-up inventory
+};
+
+TBRResult checkTBRSelfSufficiency(float tbr_calculated,
+                                   float burn_rate_atoms_s,
+                                   float initial_inventory_g);
+
 // ─── isotopeSeparationWork ────────────────────────────────────────────────────
 //
 //  Separative Work Units (SWU) for isotope separation (e.g. D/T/He-3/He-4).

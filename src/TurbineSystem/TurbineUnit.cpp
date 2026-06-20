@@ -38,9 +38,13 @@ void TurbineUnitController::runStateMachine(float dt, float grid_freq_Hz)
         break;
 
     case TurbineState::RollingUp:
-        // Open MSIV to ~10%, let turbine spin up
+        // Open the throttle/governor valve to a small "turning gear release"
+        // position so steam can actually flow and accelerate the rotor.
+        // Without this, gov_flow = sg_flow * msiv_position * governor_demand
+        // stays at zero forever and the turbine never spins up.
         s.msiv_open = true;
-        s.msiv_setpoint = 0.12f;
+        s.msiv_setpoint   = 0.12f;
+        s.governor_demand = 0.12f;
         s.generator.exciter_on = true;
         // Transition when rpm close to nominal
         if (s.rpm > RPM_NOMINAL * 0.98f && s.rpm < RPM_NOMINAL * 1.02f) {
@@ -63,7 +67,7 @@ void TurbineUnitController::runStateMachine(float dt, float grid_freq_Hz)
         // Check sync conditions
         float dfreq  = std::abs(s.generator.frequency_Hz - grid_freq_Hz);
         float dphase = std::abs(s.generator.phase_rad
-                                - std::fmodf(2.f * PI * grid_freq_Hz * sync_timer_s_, 2.f * PI));
+                                - std::fmod(2.f * PI * grid_freq_Hz * sync_timer_s_, 2.f * PI));
         dphase = std::min(dphase, 2.f * PI - dphase); // wrap
 
         if (breaker_close_requested_ && dfreq < 0.15f && dphase < 0.26f) { // 15° deg
@@ -133,16 +137,28 @@ void TurbineUnitController::runStateMachine(float dt, float grid_freq_Hz)
 void TurbineUnitController::updateSteamGenerator(float dt)
 {
     // Feedwater pump operation
+    // FW pump suction comes from the hotwell via the Condensate Extraction
+    // Pump (CEP). If the hotwell runs dry, suction_avail_frac (computed in
+    // updateHotwell on the previous tick) collapses toward zero, the FW
+    // pumps cavitate, and prolonged low suction trips them.
     float fw_total_flow = 0.f;
     for (int i = 0; i < 2; i++) {
         auto& p = s.fw_pump[i];
         if (p.running && !p.trip) {
-            // Full-speed pump provides up to 1000 kg/s at design point
+            // Full-speed pump provides up to 1000 kg/s at design point,
+            // de-rated by cavitation if the hotwell can't supply suction.
             p.flow_kg_s      = 1000.f * p.speed_frac
-                             * (s.state == TurbineState::Online ? 1.f : 0.3f);
-            p.discharge_MPa  = s.sg_pressure_MPa + 2.f;
+                             * (s.state == TurbineState::Online ? 1.f : 0.3f)
+                             * s.hotwell.suction_avail_frac;
+            p.discharge_MPa  = s.hotwell.suction_avail_frac > 0.05f
+                             ? s.sg_pressure_MPa + 2.f : 0.f;
             p.power_MW       = p.flow_kg_s * 2e6f / (3600.f * 0.82f) * 1e-6f; // 2 MJ/t lift
             fw_total_flow   += p.flow_kg_s;
+
+            // Low-suction protection trip
+            if (s.hotwell.low_suction_timer_s > 30.f) {
+                p.trip = true;
+            }
         } else {
             p.flow_kg_s = 0.f; p.power_MW = 0.f; p.discharge_MPa = 0.f;
         }
@@ -291,7 +307,10 @@ void TurbineUnitController::updateCondenser(float dt)
     c.temp_K = 273.f + 100.f * std::pow(c.pressure_kPa / 101.3f, 0.25f);
     c.temp_K = std::max(c.temp_K, c.cooling_water_temp_K);
 
-    // Condensate pump flow
+    // Condensate Extraction Pump flow: draws condensed steam out of the
+    // condenser hotwell, limited by pump capacity. The actual hotwell
+    // *inflow* (steam condensing) is computed in updateHotwell from
+    // steam_flow_to_turbine; this is the CEP's maximum delivery capacity.
     c.condensate_flow_kg_s = c.condensate_pump_speed * 2200.f;
 
     s.alarm_lo_condenser_vac = (c.pressure_kPa > 15.f);
@@ -304,12 +323,22 @@ void TurbineUnitController::updateHotwell(float dt)
     auto& hw = s.hotwell;
     auto& c  = s.condenser;
 
-    // Condensate in (from condenser) minus feedwater pumps out
+    // Inflow: steam that passed through the turbine (and any bypass) ends up
+    // condensing back to water in the condenser shell, which drains into the
+    // hotwell. This is the real physical link that was missing — previously
+    // the hotwell's "inflow" was an independent pump speed unrelated to how
+    // much steam the turbine had actually used.
+    float steam_condensed = s.steam_flow_to_turbine + s.bypass_valve_pos * s.sg_steam_flow_kg_s * 0.5f;
+
+    // Outflow: the CEP pulls condensate out of the hotwell to supply the FW
+    // pump suction header, limited by both CEP capacity and what the FW
+    // pumps actually drew this tick.
     float fw_out = 0.f;
     for (int i = 0; i < 2; i++) fw_out += s.fw_pump[i].flow_kg_s;
+    float cep_capacity = hw.cep_running ? c.condensate_flow_kg_s : 0.f;
+    float out_flow = std::min(fw_out, cep_capacity);
 
-    float in_flow  = c.condensate_flow_kg_s;
-    float out_flow = fw_out;
+    float in_flow  = steam_condensed;
 
     // Makeup and drain
     float makeup = hw.makeup_valve ? hw.makeup_flow_kg_s : 0.f;
@@ -323,6 +352,21 @@ void TurbineUnitController::updateHotwell(float dt)
     hw.hi_level_alarm = (hw.level_m > 3.0f);
     hw.makeup_valve   = (hw.level_m < 1.0f);
     hw.drain_valve    = (hw.level_m > 2.5f);
+
+    // CEP runs whenever there's enough water to take suction.
+    hw.cep_running = (hw.level_m > 0.15f);
+
+    // Suction availability feeds the FW pumps *next* tick: full once level
+    // is comfortably above the CEP suction bell, falling off to zero as the
+    // hotwell runs dry (cavitation).
+    float target_suction = std::clamp((hw.level_m - 0.10f) / 0.30f, 0.f, 1.f);
+    hw.suction_avail_frac = target_suction;
+
+    if (hw.suction_avail_frac < 0.1f) {
+        hw.low_suction_timer_s += dt;
+    } else {
+        hw.low_suction_timer_s = 0.f;
+    }
 }
 
 // ─── Generator ────────────────────────────────────────────────────────────────
@@ -351,6 +395,32 @@ void TurbineUnitController::updateGenerator(float dt, float grid_freq_Hz)
 
     g.overspeed_trip = (s.rpm > RPM_NOMINAL * 1.10f);
     (void)grid_freq_Hz;
+}
+
+// ─── SG Demand Factor (salt/steam coupling) ───────────────────────────────────
+float TurbineUnitController::sgDemandFactor() const
+{
+    // Rated steam flow used as the normalisation reference (matches the
+    // FW pumps' combined design flow in updateSteamGenerator).
+    constexpr float RATED_STEAM_KG_S = 1000.f;
+
+    // Steam actually leaving the SG: through the turbine governor valve,
+    // dumped via the bypass to the condenser, or vented via the relief
+    // valve. All three represent heat being removed from the secondary
+    // side, which is what lets the SG (and hence the molten salt) cool.
+    float demand = s.steam_flow_to_turbine
+                  + s.bypass_valve_pos * s.sg_steam_flow_kg_s * 0.5f;
+
+    if (s.relief_valve_open) {
+        demand += std::max(s.sg_pressure_MPa - s.relief_setpoint_MPa, 0.f) * 20.f;
+    }
+
+    // SG blowdown/sampling lines bleed a small continuous flow even with
+    // the turbine fully isolated, so the primary loop is never *completely*
+    // walled off from the SG.
+    demand = std::max(demand, 0.02f * RATED_STEAM_KG_S);
+
+    return std::clamp(demand / RATED_STEAM_KG_S, 0.f, 1.f);
 }
 
 // ─── Alarms ───────────────────────────────────────────────────────────────────

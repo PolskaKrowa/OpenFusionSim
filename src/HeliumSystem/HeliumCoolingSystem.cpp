@@ -33,6 +33,29 @@ HeliumCoolingSystem::HeliumCoolingSystem()
     s_.cryostat.turbo_pump_on    = false;
 }
 
+void HeliumCoolingSystem::reset()
+{
+    // Reconstruct a fresh HeliumSystemState in place.  This is exactly what
+    // the constructor does, so the post-reset state matches a brand-new
+    // HeliumCoolingSystem.  Cheaper and less error-prone than enumerating
+    // every field by hand, and it stays in sync if the constructor ever
+    // changes.
+    s_ = HeliumSystemState{};
+
+    auto& rc = s_.reactor_circuit;
+    for (auto& p : rc.pump) {
+        p.inlet_temp_K  = 700.f;
+        p.outlet_temp_K = 800.f;
+        p.pressure_MPa  = 8.f;
+    }
+    auto& mc = s_.magnet_circuit;
+    for (auto& p : mc.cryo_pump) {
+        p.inlet_temp_K  = 4.3f;
+        p.outlet_temp_K = 4.7f;
+        p.pressure_MPa  = 0.3f;
+    }
+}
+
 // ─── Reactor warm He circuit ──────────────────────────────────────────────────
 void HeliumCoolingSystem::updateReactorCircuit(float dt,
                                                 float fusion_power_MW,

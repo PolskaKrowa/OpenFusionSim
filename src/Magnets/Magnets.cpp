@@ -116,3 +116,50 @@ void MagnetSystem::triggerQuenchDump()
 {
     dump_triggered_ = true;
 }
+
+void MagnetSystem::clearQuenchLatch()
+{
+    // Clear the dump latch and per-coil quenched flags, but leave coil
+    // currents and temperatures as-is.  This lets the operator resume
+    // operation after a SCRAM without a full cold restart — the magnets
+    // can start ramping back up from their current state.
+    //
+    // The quenched coils have their resistance zeroed so they can carry
+    // supercurrent again.  (In reality, a quenched coil would need to be
+    // inspected before re-energizing, but for gameplay purposes we allow
+    // it — the operator is responsible for verifying the magnets are OK.)
+    dump_triggered_ = false;
+    for (auto& c : tf_coils_) {
+        c.quenched       = false;
+        c.resistance_uOhm = 0.0f;
+    }
+    for (auto& c : cs_coils_) {
+        c.quenched       = false;
+        c.resistance_uOhm = 0.0f;
+    }
+}
+
+void MagnetSystem::reset()
+{
+    // Restore every coil to its as-built state and forget any quench/dump
+    // history.  This is what the operator's RESET — COLD RESTART button
+    // needs to call: the previous SCRAM latched dump_triggered_=true, and
+    // that flag would otherwise keep state.quench_detected=true forever
+    // (which runScramLogic reads as "magnets are quenched" and re-trips
+    // the SCRAM on the next tick, trapping the sim in a soft-lock).
+    for (auto& c : tf_coils_) {
+        c.current_kA     = 0.0f;
+        c.temp_K         = cfg_.T_op_K;
+        c.quenched       = false;
+        c.resistance_uOhm = 0.0f;
+    }
+    for (auto& c : cs_coils_) {
+        c.current_kA     = 0.0f;
+        c.temp_K         = cfg_.T_op_K;
+        c.quenched       = false;
+        c.resistance_uOhm = 0.0f;
+    }
+    dump_triggered_   = false;
+    cryo_load_W_      = 0.0f;
+    current_ramp_rate_ = 0.0f;
+}

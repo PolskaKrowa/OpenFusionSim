@@ -17,6 +17,11 @@ public:
                 float grid_frequency_Hz,
                 const float salt_heat_MW[4]); // heat from MoltenSalt per SG
 
+    // Cold-restart: every unit back to Offline with zero steam pressure,
+    // zero RPM, no trips.  Operator-set per-pump running/speed flags are
+    // preserved (those are configuration, not transient state).
+    void reset();
+
     // Access individual units for UI and MoltenSalt heat assignment
     TurbineUnitController& unit(int i) { return units_[i]; }
     const TurbineUnitController& unit(int i) const { return units_[i]; }

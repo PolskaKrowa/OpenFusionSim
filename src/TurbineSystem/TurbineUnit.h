@@ -73,6 +73,12 @@ struct Hotwell {
     float drain_flow_kg_s      = 8.f;
     bool  lo_level_alarm       = false;
     bool  hi_level_alarm       = false;
+    // Condensate Extraction Pump: draws from the hotwell and supplies the
+    // feedwater pumps' suction. If the hotwell runs low, suction is lost
+    // and the FW pumps cavitate (flow falls off, then trips on low suction).
+    bool  cep_running          = false;
+    float suction_avail_frac   = 1.f;   // 0 = no suction (cavitating), 1 = full
+    float low_suction_timer_s  = 0.f;
 };
 
 // ─── Generator ────────────────────────────────────────────────────────────────
@@ -159,6 +165,13 @@ public:
     void cmdOpenBreaker();             // disconnect from grid
 
     float netPowerMW() const { return s.generator.breaker_closed ? s.generator.power_MW : 0.f; }
+
+    // How much of this SG's potential heat output the secondary (steam) side
+    // can currently carry away, as a fraction of rated steam flow. Used by
+    // the molten salt loop to determine how much it can actually cool down
+    // in this SG — if the turbine can't take steam, the salt passes through
+    // largely unchanged and the primary loop heats up instead.
+    float sgDemandFactor() const;
 
 private:
     void updateSteamGenerator(float dt);

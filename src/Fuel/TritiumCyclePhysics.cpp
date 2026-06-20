@@ -185,4 +185,92 @@ SeparationResult isotopeSeparationWork(float F_feed_mol_s,
     return res;
 }
 
+// ─── tritiumPermeationTwoRegime ───────────────────────────────────────────────
+//
+//  Two-regime model:
+//    (a) Diffusion-limited (Sieverts):  J = P_s(T) · (√p_up - √p_down) / L
+//    (b) Recombination-limited:        J = k_r(T) · K_S(T)² · (p_up - p_down)
+//        where k_r is the surface recombination rate constant.
+//
+//  Transition criterion (causey 2002): regime (b) dominates when
+//      k_r(T) · K_S(T) · √p  <<  D(T) / L
+//  i.e. the surface recombination is the rate-limiting step.
+//  For typical fusion conditions: oxidized 316SS below 500 °C is regime (b);
+//  clean W above 600 °C is regime (a).
+//
+TwoRegimePermeationResult tritiumPermeationTwoRegime(
+    float p_upstream_Pa,
+    float p_downstream_Pa,
+    float T_wall_K,
+    float thickness_m,
+    float area_m2,
+    WallMaterial material,
+    float barrier_factor,
+    bool  surface_oxidized)
+{
+    TwoRegimePermeationResult res{};
+
+    if (thickness_m < 1e-6f || T_wall_K < 200.0f) return res;
+
+    // First compute the diffusion-limited flux (regime a)
+    auto base = tritiumPermeation(p_upstream_Pa, p_downstream_Pa,
+                                    T_wall_K, thickness_m, area_m2, material);
+    res.J_diffusion_limited = base.flux_mol_m2s;
+
+    // Recombination-limited flux (regime b):
+    //   J = k_r(T) · K_S(T)² · (p_up - p_down)
+    // We use the simplified relation J_b = J_a · α_surf, where α_surf is the
+    // surface transmission coefficient (0-1).  For clean metal α ≈ 1; for
+    // oxidized surfaces α ≈ 0.001-0.01.
+    float alpha_surf = surface_oxidized ? 0.005f : 1.0f;
+    res.J_recombination_limited = res.J_diffusion_limited * alpha_surf;
+
+    // Select regime based on the surface state and temperature
+    // (Transition temperature ~500 °C for steel, ~700 °C for tungsten)
+    float T_trans_C = (material == WallMaterial::Tungsten) ? 700.0f : 500.0f;
+    float T_wall_C  = T_wall_K - 273.15f;
+    bool regime_b = surface_oxidized || (T_wall_C < T_trans_C);
+    res.regime_is_diffusion = !regime_b;
+    res.flux_mol_m2s = regime_b ? res.J_recombination_limited
+                                : res.J_diffusion_limited;
+
+    // Apply barrier transmission factor (Al₂O₃, Er₂O₃, Cr₂O₃ coatings)
+    res.barrier_factor = barrier_factor;
+    res.flux_mol_m2s *= barrier_factor;
+
+    res.total_loss_mol_s = res.flux_mol_m2s * area_m2;
+    res.total_loss_Bq = static_cast<float>(
+        res.total_loss_mol_s * N_A * LAMBDA_T);
+
+    return res;
+}
+
+// ─── TBR self-sufficiency check ──────────────────────────────────────────────
+TBRResult checkTBRSelfSufficiency(float tbr_calculated,
+                                   float burn_rate_atoms_s,
+                                   float initial_inventory_g)
+{
+    TBRResult res{};
+
+    // Post-2020 required TBR (Abdou 2021)
+    res.tbr_required = 1.10f;
+    res.tbr_calculated = tbr_calculated;
+    res.self_sufficient = (tbr_calculated >= res.tbr_required);
+
+    // Doubling time: time for net bred T to equal the initial inventory
+    //   Net breed rate = (TBR - 1) · burn_rate  (after replacing what was burned)
+    //   t_double = N_initial / net_breed_rate
+    // Initial inventory in atoms: 1 g T = 1/3 g-mol = N_A/3 atoms ≈ 2.0e23
+    double N_initial = static_cast<double>(initial_inventory_g) * N_A / 3.016049;
+    double net_breed = static_cast<double>(tbr_calculated - 1.0f) * burn_rate_atoms_s;
+    if (net_breed > 1.0) {
+        double t_double_s = N_initial / net_breed;
+        res.doubling_time_yr = static_cast<float>(t_double_s / (365.25 * 24.0 * 3600.0));
+    } else {
+        res.doubling_time_yr = 1e9f;   // never doubles (TBR < 1)
+    }
+
+    return res;
+}
+
 } // namespace TritiumCyclePhysics

@@ -4,6 +4,7 @@
 add_library(steampower STATIC
     SteamPower.cpp
     SteamCyclePhysics.cpp
+    iapws_if97_coefficients.cpp    # NEW: full IAPWS-IF97 coefficient tables
 )
 
 target_include_directories(steampower

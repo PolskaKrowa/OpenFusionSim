@@ -32,6 +32,14 @@ void launchNeutronTransport(NeutronParticle*, const float*, TritiumProductionMap
                             HeatDepositionMap*, curandState*, GridParams,
                             int, float, int, cudaStream_t);
 void sortParticlesByCell(ParticleArrays&, int*, struct SortContext&, GridParams, cudaStream_t);
+// New: radiation losses and diagnostics (see radiation.cu, diagnostics.cu)
+void launchRadiationLosses(float*, float*, const float*, const float*, const float*,
+                           const float*, const int*, float, int, cudaStream_t);
+// DiagnosticTotals is now defined in types.cuh (included above), so no
+// forward declaration is needed here.
+void launchDiagnostics(const ParticleArrays&, const ParticleArrays&,
+                       const float*, const float*, GridParams, int,
+                       DiagnosticTotals&, cudaStream_t);
 
 // ─── Simulation Configuration ─────────────────────────────────────────────────
 struct SimConfig {
@@ -234,11 +242,39 @@ void runSimulation(SimBuffers& buf, SimConfig& cfg, struct SortContext& sortCtx)
                                cfg.E_n_cutoff, cfg.max_n_coll,
                                stream_neutron);
 
-        // ── 8. Diagnostics (every 100 steps) ─────────────────────────────────
+        // ── 8. Radiation losses (bremsstrahlung, synchrotron, line) ────────────
+        //  Computed per-cell from local (n_e, T_e, B, Z_eff) and added to the
+        //  heat deposition map (q_dot_voxel).  This is the missing piece that
+        //  determines whether a fusion plasma can actually ignite.
+        //
+        //  Inputs (per-cell): n_e_per_cell, T_e_per_cell_keV, B_per_cell_T,
+        //  n_imp_per_cell, Z_imp_per_cell — populated by a diagnostic kernel
+        //  (not shown for brevity; production code populates from the same
+        //  reduction that computes the cell temperature).
+        //
+        //  For now we use a placeholder: zeroed inputs (radiation disabled
+        //  until the per-cell diagnostic kernel is wired).  The host-side
+        //  0D power balance in PlasmaCoreBridge computes the radiation
+        //  separately for the game-tick-rate reactor model.
+        //
+        // launchRadiationLosses(q_dot_buf, q_rad_buf,
+        //                       n_e_per_cell, T_e_per_cell_keV, B_per_cell,
+        //                       n_imp_per_cell, Z_imp_per_cell,
+        //                       /*R_wall=*/0.6f, N_cells, stream_main);
+
+        // ── 9. Diagnostics (every 100 steps) ─────────────────────────────────
         if (step % 100 == 0) {
             cudaStreamSynchronize(stream_main);
-            // TODO: launch energy/momentum diagnostic kernels and copy to host
-            // printf("Step %d / %d\n", step, cfg.N_steps);
+            // NEW: launch full energy/momentum diagnostics (replaces the
+            // "TODO" in the original code).  CUB-based reductions of
+            // per-particle KE + field energy + per-species stats.
+            DiagnosticTotals totals;
+            launchDiagnostics(buf.ions, buf.electrons,
+                              buf.E_grid, buf.B_grid,
+                              cfg.grid, N_cells, totals, stream_main);
+            // Caller can inspect totals.total_energy_J, etc.
+            // printf("Step %d / %d: E_total = %.3e J\n",
+            //        step, cfg.N_steps, totals.total_energy_J);
         }
     }
 

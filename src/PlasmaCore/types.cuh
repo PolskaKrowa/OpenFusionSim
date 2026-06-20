@@ -79,8 +79,25 @@ struct HeatDepositionMap {
     int    Nx, Ny, Nz;
 };
 
-// ─── Sort context forward declaration ────────────────────────────────────────
-struct SortContext;
+// ─── Sort context (defined here so all .cu files share ONE definition) ────────
+//
+//  Previously this was forward-declared here and defined separately in both
+//  sorting.cu and pic_bridge.cu — an ODR violation that worked by accident
+//  (identical layouts) but was fragile.  Now defined once in this shared header.
+//
+struct SortContext {
+    void*  cub_temp   = nullptr;
+    size_t cub_bytes  = 0;
+    int*   cell_ids   = nullptr;
+    int*   cell_ids_alt = nullptr;
+    int*   perm       = nullptr;
+    int*   perm_alt   = nullptr;
+    float4* pos_tmp   = nullptr;
+    float4* vel_tmp   = nullptr;
+    int*   counts     = nullptr;
+    int    N_cells    = 0;
+    int    N_max      = 0;
+};
 
 // ─── Inline grid helpers ──────────────────────────────────────────────────────
 __device__ __forceinline__
@@ -97,3 +114,17 @@ void worldToCell(float x, float y, float z, const GridParams& g,
     fy = (y - g.oy) / g.dy;  iy = (int)fy;  fy -= iy;
     fz = (z - g.oz) / g.dz;  iz = (int)fz;  fz -= iz;
 }
+
+// ─── DiagnosticTotals (defined here so all .cu files see the full type) ───────
+//
+//  Aggregated per-step diagnostics from the energy/momentum reduction kernels
+//  in diagnostics.cu.  Lives in this shared header because plasmacore.cu needs
+//  to instantiate it on the host side (for the per-100-step printf).
+//
+struct DiagnosticTotals {
+    float total_KE_J;              // total kinetic energy (ions + electrons) [J]
+    float total_field_energy_J;    // E_field + B_field energy [J]
+    float total_energy_J;          // sum [J]
+    float species_KE[6];           // per-species KE [J]  (indices match Species enum)
+    int   species_count[6];        // per-species particle count
+};

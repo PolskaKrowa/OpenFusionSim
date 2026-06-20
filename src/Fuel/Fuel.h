@@ -37,13 +37,25 @@ struct FuelConfig {
 
     // Wall recycling coefficient
     float recycling_coeff = 0.85f;  // fraction of particles hitting wall that return
-};
 
+    // ── Exhaust / ash handling (divertor + cryopumps) ────────────────────────
+    float plasma_volume_m3     = 840.0f;  // ITER-class plasma volume [m^3]
+    float m_He_kg              = 6.6447e-27f; // He-4 ash particle mass
+    float m_imp_kg             = 1.99e-26f;   // ~carbon "junk" particle mass (12 amu)
+    float sputter_yield_g_per_MWs = 2.0e-8f;  // wall erosion → impurities per divertor MJ
+    float default_pump_speed_Ls   = 50.0f;    // cryopump speed when "ON" [L/s]
+};
 class FuelSystem {
 public:
     explicit FuelSystem(const FuelConfig& cfg);
 
     void update(ReactorState& state, const SimTime& t);
+
+    // Cold-restart: restore D/T inventories to construction defaults and
+    // zero out the in-vessel ash/impurity counters and pellet timer.
+    // Burned-fuel totals (D_consumed_g_, T_consumed_g_) are also reset so
+    // the post-reset accounting starts clean.
+    void reset();
 
     float deuteriumInventory() const  { return D_inventory_g_; }
     float tritiumInventory()   const  { return T_inventory_g_; }
@@ -57,6 +69,7 @@ private:
     void  runPelletInjector(ReactorState& state, float dt);
     void  accountBurnup    (ReactorState& state, float dt);
     void  accountRecycling (ReactorState& state, float dt);
+    void  accountExhaust   (ReactorState& state, float dt);
 
     FuelConfig cfg_;
     float D_inventory_g_;
@@ -64,4 +77,6 @@ private:
     float pellet_timer_s_ = 0.0f;  // time until next pellet fires
     float D_consumed_g_   = 0.0f;  // cumulative
     float T_consumed_g_   = 0.0f;
+    float N_He_ash_       = 0.0f;  // He-4 ash particle count currently in vessel
+    float N_impurity_     = 0.0f;  // impurity ("junk") particle count in vessel
 };
