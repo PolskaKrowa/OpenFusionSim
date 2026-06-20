@@ -7,8 +7,7 @@
 //  pressure of < 1e-4 Pa before plasma initiation.  This module models:
 //
 //    - Roughing pump (rotary vane): pulls from atmosphere (~101325 Pa) down
-//      to ~1 Pa.  Speed: ~1000 m³/h = 0.28 m³/s.  Cannot operate below 1 Pa
-//      (back-streaming oil).
+//      to ~1 Pa. Cannot operate below 1 Pa (back-streaming oil).
 //
 //    - Turbo-molecular pump: pulls from 1 Pa down to 1e-5 Pa.  Cannot
 //      operate above 10 Pa (bearing damage).  The operator must wait for
