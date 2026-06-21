@@ -40,9 +40,11 @@ void DisruptionMitigationSystem::fireMitigation(ReactorState& state)
         state.mgi_pressure_Pa = cfg_.mgi_pressure_rise_Pa;
         state.mitigation_force_N = state.plasma_current_MA * 1e6f
                                  * cfg_.mgi_halo_reduction;
-        // Force the vessel pressure up (MGI releases gas into vessel)
-        state.vessel_pressure_Pa = std::max(state.vessel_pressure_Pa,
-                                              cfg_.mgi_pressure_rise_Pa);
+        // Request a pressure rise in the vessel.  VacuumVessel::update will
+        // pick this up via forcePressureRise() and apply it to its internal
+        // pressure_Pa_.  Previously we wrote state.vessel_pressure_Pa
+        // directly here, but VacuumVessel::update overwrote it next tick.
+        state.dm_pressure_rise_Pa = cfg_.mgi_pressure_rise_Pa;
         pumpdown_remaining_s_ = cfg_.post_mitigation_pumpdown_s;
     } else if (fire_spi) {
         spi_fired_ = true;
@@ -53,7 +55,9 @@ void DisruptionMitigationSystem::fireMitigation(ReactorState& state)
         state.spi_pellet_mass_g = cfg_.spi_pellet_mass_g;
         state.mitigation_force_N = state.plasma_current_MA * 1e6f
                                  * cfg_.spi_halo_reduction;
-        pumpdown_remaining_s_ = cfg_.post_mitigation_pumpdown_s * 0.3f;  // less gas
+        // SPI injects less gas than MGI (deuterium pellets, not noble gas)
+        state.dm_pressure_rise_Pa = cfg_.mgi_pressure_rise_Pa * 0.3f;
+        pumpdown_remaining_s_ = cfg_.post_mitigation_pumpdown_s * 0.3f;
     }
     time_since_fire_s_ = 0.f;
 }

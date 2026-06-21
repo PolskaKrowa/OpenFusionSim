@@ -19,6 +19,14 @@
 #include <algorithm>
 #include <cstdio>
 
+// ── File-scope particle size for the particle scatter plot ──────────────────
+//  Previously there were TWO `static float particle_size = 1.8f;` declarations
+//  in two different scopes (one in the render BeginChild, one in the controls
+//  BeginChild).  The slider modified the controls-scope one but the render
+//  code read the render-scope one — so moving the slider had no effect.
+//  Now there's one file-scope static shared by both.
+static float g_particle_size = 1.8f;
+
 // ─── Colour palette (mirror of main.cpp's Col namespace) ─────────────────────
 namespace VizCol {
     static const ImVec4 BG         = {0.04f, 0.06f, 0.04f, 1.f};
@@ -392,9 +400,14 @@ void TabFusionReactions(const ReactorState& s, const PlasmaViz& viz)
             Row("Neutron energy",  (float)(cumul_energy_MJ * 14.070f / 17.589f), "%.2f", "MJ", VizCol::CYAN);
 
             ImGui::Spacing();
-            // Power-balance check
+            // Power-balance check.
+            //  Use the actual aux heating from the H&CD systems rather than
+            //  the old hardcoded 50 MW (which was left over from the original
+            //  pre-H&CD power balance model).
             Hdr("POWER BALANCE");
-            float P_in  = s.alpha_power_MW + 50.0f;  // α + 50 MW aux
+            float P_aux = s.hcd_nbi_actual_MW + s.hcd_icrh_actual_MW
+                        + s.hcd_ecrh_actual_MW + s.hcd_lhcd_actual_MW;
+            float P_in  = s.alpha_power_MW + P_aux;
             float P_out = s.radiated_power_MW + s.fusion_power_MW * (14.070f/17.589f);
             Row("P_in  (α + aux)",  P_in,  "%.2f", "MW", VizCol::GREEN);
             Row("P_out (rad + n)",  P_out, "%.2f", "MW", VizCol::RED);
@@ -513,7 +526,8 @@ void TabParticleDistribution(const ReactorState& s, const PlasmaViz& viz,
         //
         //  We render species in order of abundance (electrons first, then
         //  D, T, α) so the rarer species appear on top.
-        static float particle_size = 1.8f;
+        //  (particle_size is the file-scope g_particle_size, set by the
+        //  "Point size" slider in the controls panel below.)
         int total_rendered = 0;
 
         for (int sp = 0; sp < PlasmaViz::N_SPECIES; sp++) {
@@ -541,7 +555,7 @@ void TabParticleDistribution(const ReactorState& s, const PlasmaViz& viz,
                     continue;
 
                 // Vary point size by weight (heavier = bigger)
-                float size = particle_size * (0.5f + 1.5f * std::min(P.weight * 1e-19f, 1.0f));
+                float size = g_particle_size * (0.5f + 1.5f * std::min(P.weight * 1e-19f, 1.0f));
                 dl->AddCircleFilled(pt, size, icol);
                 total_rendered++;
             }
@@ -602,11 +616,12 @@ void TabParticleDistribution(const ReactorState& s, const PlasmaViz& viz,
         ImGui::RadioButton("R-Z (poloidal)", &projection_mode, 0);
         ImGui::RadioButton("R-φ (top-down)",  &projection_mode, 1);
 
-        // Particle size slider
+        // Particle size slider — controls the file-scope g_particle_size
+        // which the render code above reads.  Previously this was a separate
+        // local static, so the slider didn't affect rendering.
         ImGui::Spacing();
         Hdr("RENDERING");
-        static float particle_size = 1.8f;
-        ImGui::SliderFloat("Point size", &particle_size, 0.5f, 5.0f);
+        ImGui::SliderFloat("Point size", &g_particle_size, 0.5f, 5.0f);
 
         // Per-species statistics
         ImGui::Spacing();

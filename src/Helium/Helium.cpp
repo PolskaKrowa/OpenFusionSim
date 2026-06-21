@@ -26,7 +26,20 @@ void HeliumSystem::update(ReactorState& state, const SimTime& t)
     updatePumping        (state, dt);
     updateDivertorThermal(state, dt);
 
-    state.helium_fraction   = he_fraction_;
+    // ── helium_fraction ownership ───────────────────────────────────────────
+    //  The Fuel module's accountExhaust() writes state.helium_fraction based
+    //  on a rigorous particle-count bookkeeping (N_He_ash / N_total).  We
+    //  previously OVERWROTE that here with our own ODE-based he_fraction_,
+    //  which was a separate, inconsistent model of the same quantity.  The
+    //  PlasmaCoreBridge read whichever value was written last (Helium's, since
+    //  it runs after Fuel in the main loop), ignoring Fuel's model entirely.
+    //
+    //  Now: Fuel owns state.helium_fraction.  Helium's he_fraction_ is still
+    //  tracked internally (for the divertor pumping model) but is NOT written
+    //  back to ReactorState.  This eliminates the double-write race.
+    //
+    //  (We DO still write pump_throughput_Pa and divertor_temp_K — those are
+    //  Helium's own fields that no other module touches.)
     state.pump_throughput_Pa = pump_throughput_;
     state.divertor_temp_K    = divertor_temp_K_;
     state.divertor_overtemp  = (divertor_temp_K_ > cfg_.max_tile_temp_K);
@@ -52,8 +65,12 @@ void HeliumSystem::updateAshAccumulation(ReactorState& state, float dt)
     float alphas_per_s = state.alpha_power_MW * 1e6f / E_alpha_J;
     float source_frac  = alphas_per_s / N_plasma; // fraction/s added
 
-    // He confinement time = τ_He_mult * τ_E (τ_E ~ 3 s for ITER)
-    float tau_E = 3.0f; // energy confinement time [s] — simplification
+    // He confinement time = τ_He_mult × τ_E.
+    //  Use the actual energy confinement time from the PlasmaCoreBridge
+    //  (state.tau_E_s, computed by IPB98(y,2)) rather than the old hardcoded
+    //  3.0 s.  At full ITER power, τ_E is ~3.7 s; during ramp-up it's much
+    //  lower (~1 s), which means He exhausts faster early in the discharge.
+    float tau_E = (state.tau_E_s > 0.1f) ? state.tau_E_s : 1.0f;
     float tau_He = cfg_.He_confinement_mult * tau_E;
     float sink_frac = he_fraction_ / tau_He; // exhaust rate
 
@@ -75,8 +92,8 @@ void HeliumSystem::updatePumping(ReactorState& state, float dt)
         return;
     }
 
-    // Divertor pumping removes He + D/T from the scrape-off layer
-    // Throughput ~ pump_speed * edge_pressure
+    // Divertor pumping removes He + D/T from the scrape-off layer.
+    //  Throughput = pump_speed [m³/s] × edge_pressure [Pa]  →  [Pa·m³/s] = [W]
     float edge_pressure_Pa = state.plasma_density_m3 * 1.38e-23f
                            * (state.plasma_temp_keV * 1e3f * 1.602e-19f / 1.38e-23f)
                            * 1e-4f; // very rough edge estimate
@@ -84,12 +101,21 @@ void HeliumSystem::updatePumping(ReactorState& state, float dt)
     pump_throughput_ = std::min(cfg_.pump_speed_m3s * edge_pressure_Pa,
                                 cfg_.max_throughput_Pa_m3s);
 
-    // He removed per second
-    float He_removal_rate = pump_throughput_ / (state.plasma_density_m3 * 840.0f + 1.0f);
+    // He removal rate (fraction per second).
+    //  The volumetric pumping rate is pump_speed [m³/s].  The fraction of
+    //  the plasma volume pumped per second is pump_speed / V_plasma.  He is
+    //  removed at that rate × its fraction.  This gives units of 1/s, which
+    //  is correct for a fraction-per-second decay.
+    //
+    //  The old code used `pump_throughput_ / (n_e × V)` which has units of
+    //  (J/s) / particles = J·s⁻¹·particle⁻¹ — not a fraction-per-second
+    //  rate.  Numerically it gave ~2.4e-22 (effectively zero), so He pumping
+    //  did nothing.  The new formula gives a realistic ~0.24/s at full pump
+    //  speed (200 m³/s / 840 m³), so He exhausts with τ ≈ 4 s.
+    constexpr float V_plasma = 840.0f;  // m³
+    float He_removal_rate = cfg_.pump_speed_m3s / V_plasma;  // 1/s
     he_fraction_ -= He_removal_rate * he_fraction_ * dt;
     he_fraction_  = std::max(0.0f, he_fraction_);
-    (void)dt;
-    (void)state;
 }
 
 void HeliumSystem::updateDivertorThermal(ReactorState& state, float dt)

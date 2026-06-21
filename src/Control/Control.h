@@ -75,7 +75,7 @@ private:
     void runTemperatureControl(ReactorState& state, float dt);
     void runDensityControl    (ReactorState& state, float dt);
     void runDisruptionWatch   (ReactorState& state, float dt);
-    void runRunawayMonitor    (ReactorState& state);
+    void runRunawayMonitor    (ReactorState& state, float dt);
     void runScramLogic        (ReactorState& state);
     void runRampdown          (ReactorState& state, float dt);
     void runShapeControl      (ReactorState& state, float dt);

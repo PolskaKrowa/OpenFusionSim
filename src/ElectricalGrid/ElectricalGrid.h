@@ -44,6 +44,11 @@ struct GridState {
     bool  overfrequency_alarm    = false;
     bool  underfrequency_trip    = false; // <47.5 Hz → station blackout
     bool  loss_of_offsite_power  = false; // external grid unavailable
+    // Grid phase for synchronisation checks.  Advanced by updateFrequency()
+    // so that generators can compare their phase against the grid phase
+    // (the old code used `grid_.frequency_Hz * 2π * 0.f` which was always 0,
+    // making the synch check effectively random).
+    float grid_phase_rad         = 0.f;
     std::array<GeneratorBus, 4> bus;
 };
 

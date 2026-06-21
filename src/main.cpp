@@ -1323,7 +1323,7 @@ static void TabVacuumDM(ReactorState& s, VacuumVesselSystem& vac,
         if(RedBtn("Stop Turbo",{bw,0.f})) s.vessel_turbo_on = false;
 
         Hdr("BAKEOUT & CONDITIONING");
-        ImGui::Checkbox("Wall Bakeout (423 K)", &s.vessel_bakeout_on);
+        ImGui::Checkbox("Wall Bakeout (423 K, 5 min)", &s.vessel_bakeout_on);
         Row("Bakeout Progress", vac.bakeoutProgress()*100.f, "%.1f", "%",
             vac.bakeoutComplete() ? Col::GREEN : Col::AMBER);
         Row("Boronization Thickness", s.boronization_thickness_nm, "%.0f", "nm", Col::CYAN);
@@ -1520,7 +1520,7 @@ static void TabOperations(const ReactorState& s, const SimTime& t)
     stepLine(3, "Pump down vessel",
              "Go to VACUUM&DM tab → Start Roughing Pump.  Wait for pressure < 1 Pa, "
              "then Start Turbo Pump.  Wait for pressure < 1e-3 Pa.  "
-             "If pressure plateaus, run Wall Bakeout (24 h at 423 K).",
+             "If pressure plateaus, run Wall Bakeout (5 min at 423 K).",
              s3, s2 && !s3);
 
     // Step 4: Fuel inventory available
@@ -2073,7 +2073,7 @@ int main(int,char**)
                 cause_buf,
                 "Start the vessel roughing pump, wait for pressure < 1 Pa, "
                 "then start the turbo pump (VACUUM & DM tab).  If pressure "
-                "plateaus above 1e-3 Pa, run wall bakeout (423 K for 24 h) "
+                "plateaus above 1e-3 Pa, run wall bakeout (423 K for 5 min) "
                 "to desorb water.  Check for vessel breach (loss-of-vacuum "
                 "accident) if pressure rises rapidly with pumps on.",
                 AlarmSeverity::Warning);

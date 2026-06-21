@@ -234,6 +234,12 @@ struct ReactorState {
     bool  spi_fired              = false;
     float spi_pellet_mass_g      = 0.f;     // mass of last injected pellet
     float mitigation_force_N     = 0.f;     // peak halo force reduction
+    // Pressure rise requested by DM module (MGI gas injection).  VacuumVessel
+    // reads this and applies it to its internal pressure_Pa_ via
+    // forcePressureRise().  Without this indirection, DM writing
+    // state.vessel_pressure_Pa directly was overwritten by VacuumVessel::update
+    // on the next tick.
+    float dm_pressure_rise_Pa    = 0.f;
 
     // ── Wall conditioning ─────────────────────────────────────────────────────
     //  Periodic boronization coats the first wall with a thin boron film that

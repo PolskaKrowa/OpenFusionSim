@@ -32,9 +32,13 @@
 static ConfinementPhysics::TokamakGeometry makeGeometry(const ReactorState& s)
 {
     ConfinementPhysics::TokamakGeometry g;
-    g.R_major_m    = 6.2f;
-    g.a_minor_m    = 2.0f;
-    g.kappa        = 1.7f;
+    g.R_major_m    = s.R_out_m;          // outer major radius [m]  (ITER: 6.2)
+    g.a_minor_m    = 2.0f;               // minor radius [m]  (fixed for ITER-class)
+    // Read elongation from ReactorState (set by the shape controller in
+    // ControlSystem::runShapeControl).  Previously this was hardcoded to
+    // 1.7f, which meant the operator's κ slider had no effect on the plasma
+    // physics (volume, q_95, confinement time all used 1.7 regardless).
+    g.kappa        = std::clamp(s.kappa, 1.0f, 2.5f);
     g.B_toroidal_T = s.B_toroidal_T;
     g.I_plasma_MA  = s.plasma_current_MA;
     return g;
@@ -211,7 +215,26 @@ void PlasmaCoreBridge::update(ReactorState& state, float dt)
     updatePowerBalance(state, dt);
 
     // ── MHD disruption tracking ──────────────────────────────────────────────
+    //  updateMHD may overwrite state.q_safety with the MHD-computed value
+    //  (which uses the integrated current profile, not the 0D cylindrical
+    //  formula).  After MHD runs, re-evaluate the q-based disruption flag
+    //  using the final q_safety so the disruption status is consistent with
+    //  the value the UI displays.  Previously the disruption flag was set
+    //  in updatePowerBalance using the 0D q, then MHD overwrote q — so the
+    //  flag could be stale (e.g. 0D says q=1.9 → disruption, but MHD says
+    //  q=2.1 → no disruption, yet the flag stayed true).
     updateMHD(state, dt);
+
+    // Re-check the q-based disruption trigger with the final (MHD) q_safety.
+    //  Only re-evaluate the LowQ cause — Greenwald and Troyon don't depend
+    //  on q and were already correctly set in updatePowerBalance.
+    if (state.q_safety < 2.0f && state.plasma_current_MA > 1.0f) {
+        if (!state.disruption_flag) {
+            state.disruption_flag  = true;
+            state.disruption_cause = DisruptionCause::LowQ;
+            state.alarm_disruption = true;
+        }
+    }
 }
 
 void PlasmaCoreBridge::picStep(float dt_pic)
@@ -489,6 +512,17 @@ void PlasmaCoreBridge::updatePowerBalance(ReactorState& state, float dt)
     if (!std::isfinite(beta_p)) beta_p = 0.0f;
     state.q_safety = std::max(state.q_safety, 1.0f);
     float f_bs = bootstrapFraction(state.q_safety, R / a, beta_p);
+
+    // ── Write the bootstrap current to ReactorState ─────────────────────────
+    //  f_bs is the bootstrap fraction (fraction of I_p carried by bootstrap
+    //  current).  The actual bootstrap current in MA = f_bs × I_p_MA.
+    //  This is what the H&CD tab displays as "Bootstrap: X.XX MA" and what
+    //  the "Total non-inductive" current sums up.  Previously this was
+    //  always 0 because the bridge computed f_bs but never wrote it to
+    //  state.hcd_bootstrap_current_MA — the HCD module wrote 0 with a
+    //  "updated by bridge" comment, but the bridge never updated it.
+    state.hcd_bootstrap_current_MA = std::isfinite(f_bs)
+        ? f_bs * state.plasma_current_MA : 0.0f;
 
     // ── Scientific Q ───────────────────────────────────────────────────────
     state.Q_scientific = scientificQ(state.fusion_power_MW, pb.P_aux_MW);

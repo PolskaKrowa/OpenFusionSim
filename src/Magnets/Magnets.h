@@ -90,4 +90,8 @@ private:
     float cryo_load_W_       = 0.0f;  // cryoplant heat load [W]
     float current_ramp_rate_ = 0.0f;  // kA/s
     bool  dump_triggered_    = false;
+    // Previous-tick total CS current (for loop voltage dI/dt calculation).
+    //  Reset to 0 in reset() so the first tick after reset doesn't produce
+    //  a huge dI/dt spike.
+    float cs_current_prev_kA_ = 0.0f;
 };

@@ -7,7 +7,8 @@
 //  pressure of < 1e-4 Pa before plasma initiation.  This module models:
 //
 //    - Roughing pump (rotary vane): pulls from atmosphere (~101325 Pa) down
-//      to ~1 Pa. Cannot operate below 1 Pa (back-streaming oil).
+//      to ~1 Pa.  Speed: ~1000 m³/h = 0.28 m³/s.  Cannot operate below 1 Pa
+//      (back-streaming oil).
 //
 //    - Turbo-molecular pump: pulls from 1 Pa down to 1e-5 Pa.  Cannot
 //      operate above 10 Pa (bearing damage).  The operator must wait for
@@ -38,7 +39,7 @@ struct VacuumConfig {
     float roughing_max_Pa      = 110000.f; // can't operate above this
 
     // Turbo pump
-    float turbo_speed_m3s      = 100.0f;   // (large turbopump)
+    float turbo_speed_m3s      = 100.0f;   // 14400 m³/h (large turbopump)
     float turbo_max_Pa         = 10.0f;    // bearing damage above this
     float turbo_min_Pa         = 1e-7f;    // ultimate vacuum
 
@@ -53,7 +54,14 @@ struct VacuumConfig {
 
     // Bakeout
     float bakeout_temp_K       = 423.f;    // 150 °C
-    float bakeout_duration_s   = 5.f * 60.f;  // 5 m (compressed in sim time)
+    //  Real tokamak wall bakeout takes ~24 h at 150 °C to desorb water vapor
+    //  from the vessel walls.  For gameplay we compress this to 5 minutes —
+    //  still long enough that the operator has to plan around it (you can't
+    //  just spam-bake between every discharge), but short enough that it
+    //  doesn't kill the pace of the game.  The physics is the same: the
+    //  wall outgassing factor decays exponentially during bakeout, just on
+    //  a faster timescale.
+    float bakeout_duration_s   = 5.f * 60.f;  // 5 min (gameplay-compressed from 24 h)
 
     // Plasma-initiation interlock
     float initiation_max_Pa    = 1e-3f;    // must be below this for INITIATE
@@ -82,6 +90,14 @@ public:
     void startBoronization();
     void triggerVesselBreach();
     void clearBreach();
+
+    // Force the internal pressure to at least `Pa` (used by the Disruption
+    // Mitigation module when MGI fires — the gas injection raises vessel
+    // pressure to ~10 Pa).  Without this, MGI writes state.vessel_pressure_Pa
+    // directly, but VacuumVessel::update overwrites it next tick with the
+    // internal pressure_Pa_ (which wasn't updated), so the MGI pressure
+    // effect was lost.
+    void forcePressureRise(float Pa) { pressure_Pa_ = std::max(pressure_Pa_, Pa); }
 
     // Diagnostic accessors
     float pressure() const { return pressure_Pa_; }
@@ -115,6 +131,13 @@ private:
     // Vessel breach
     bool  breach_detected_     = false;
     std::string breach_reason_;
+    // Previous-tick pressure for breach detection (dP/dt).  This was
+    // previously a function-static in checkBreach, which meant it survived
+    // across ReactorState resets — after a SCRAM+RESET, pressure_Pa_ jumps
+    // back to 101325 Pa but prev_pressure_ still held the pre-reset value
+    // (could be 1e-5 Pa), producing a spurious dP/dt of ~1e8 Pa/s and a
+    // false breach alarm.  Now it's a member that reset() clears.
+    float prev_pressure_Pa_    = 101325.f;
 
     // Internal helpers
     float effectiveOutgasRate() const;

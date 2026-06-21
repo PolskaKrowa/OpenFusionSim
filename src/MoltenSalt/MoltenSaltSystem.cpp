@@ -180,8 +180,13 @@ void MoltenSaltSystem::updateDistribution(float dt, const float sg_steam_sat_K[4
         s_.hot_tank.level_m   -= returned / (s_.hot_tank.salt_rho * 250.f);
 
         // Cold tank temperature: mix of returning cool salt
+        //  m_tank is the mass of salt currently in the cold tank [kg].
+        //  m_return is the mass of cooled salt returning from this SG [kg].
+        //  The old code had `m_return = returned * salt_rho` which
+        //  multiplied kg by kg/m³ = kg²/m³ (wrong units).  `returned` is
+        //  already in kg (coldleg_flow [kg/s] × dt [s]), so m_return = returned.
         float m_tank    = s_.cold_tank.level_m * 250.f * s_.cold_tank.salt_rho;
-        float m_return  = returned * s_.cold_tank.salt_rho;
+        float m_return  = returned;  // already in kg
         if (m_tank > 1.f)
             s_.cold_tank.temp_K = (s_.cold_tank.temp_K * m_tank + T_out * m_return)
                                 / (m_tank + m_return);

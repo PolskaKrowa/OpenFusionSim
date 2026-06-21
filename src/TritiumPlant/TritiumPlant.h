@@ -19,8 +19,13 @@
 #include "SimTime.h"
 
 struct TritiumPlantConfig {
-    // TES extraction rate: 1 g/h of T per kg/s of Li blanket flow
-    float tes_rate_g_per_s_per_kg_s = 0.28e-3f;  // ~1 g/h at nominal flow
+    // TES extraction rate.
+    //  At nominal blanket flow (18000 kg/s), this gives ~1 g/h of T extraction
+    //  (ITER-class TES design throughput).  The previous value (0.28e-3) gave
+    //  18000 g/h — 4 orders of magnitude too high, instantly saturating the
+    //  tritium inventory and making the fuel cycle trivial.
+    //  1 g/h = 1/3600 g/s.  At 18000 kg/s flow: rate = (1/3600) / 18000 ≈ 1.54e-8
+    float tes_rate_g_per_s_per_kg_s = 1.54e-8f;
     float tes_max_g = 200.f;   // storage bed capacity
 
     // ISS processing rate

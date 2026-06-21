@@ -90,10 +90,13 @@ public:
     //
     void update(const ReactorState& s)
     {
-        // Tokamak geometry (matches confinement_physics.h defaults)
-        const float R = 6.2f;          // major radius [m]
-        const float a = 2.0f;          // minor radius [m]
-        const float kappa = 1.7f;      // elongation
+        // Tokamak geometry — read from ReactorState (set by the shape
+        // controller) rather than hardcoded.  Previously these were all
+        // hardcoded ITER values, so the visualization didn't update when
+        // the operator changed the plasma shape via the κ/δ sliders.
+        const float R = s.R_out_m;          // major radius [m]
+        const float a = 2.0f;               // minor radius [m] (fixed)
+        const float kappa = std::clamp(s.kappa, 1.0f, 2.5f);  // elongation
         const float a_eff = a * std::sqrt(kappa);  // effective minor radius
 
         // 0D plasma state from the bridge

@@ -26,6 +26,7 @@ void VacuumVesselSystem::reset()
     boronization_elapsed_s_    = 0.f;
     breach_detected_     = false;
     breach_reason_.clear();
+    prev_pressure_Pa_    = 101325.f;  // reset to atmospheric
 }
 
 void VacuumVesselSystem::startTurbo()
@@ -37,6 +38,13 @@ void VacuumVesselSystem::startTurbo()
 
 void VacuumVesselSystem::startBoronization()
 {
+    // Guard: don't restart if already in progress.  Previously this function
+    // unconditionally set boronization_elapsed_s_ = 0, and update() called
+    // startBoronization() every tick while state.boronization_in_progress
+    // was true — so the elapsed timer was reset to 0 every tick and
+    // boronization never completed.
+    if (boronization_in_progress_) return;
+
     // Can only boronize if vacuum is good and plasma is cold (no plasma to
     // interfere with the diborane gas)
     if (pressure_Pa_ > cfg_.initiation_max_Pa) return;
@@ -76,19 +84,34 @@ float VacuumVesselSystem::effectiveOutgasRate() const
 void VacuumVesselSystem::updateBakeout(float dt)
 {
     if (!bakeout_on_) {
-        // Cool back to room temp when bakeout is off
+        // Cool back to room temp when bakeout is off.
+        //  Also: if the operator turns bakeout OFF after it completed, clear
+        //  the complete flag so they can re-bake later by turning it back ON.
+        bakeout_complete_ = false;
         wall_temp_K_ += (300.f - wall_temp_K_) * 0.01f * dt;
         return;
     }
 
-    // Heat wall toward bakeout temperature
-    wall_temp_K_ += (cfg_.bakeout_temp_K - wall_temp_K_) * 0.005f * dt;
+    // Heat wall toward bakeout temperature.
+    //  With the 5-minute gameplay-compressed bakeout, the wall needs to reach
+    //  423 K fairly quickly or the outgassing decay won't start in time.
+    //  The 0.005 rate gave a ~200 s heat-up time constant (3.3 min) — too
+    //  slow.  0.05 gives a ~20 s time constant, so the wall is at bakeout
+    //  temp within ~1 minute of turning bakeout on, leaving 4 minutes for
+    //  the outgassing decay.
+    wall_temp_K_ += (cfg_.bakeout_temp_K - wall_temp_K_) * 0.05f * dt;
 
     // Bakeout progress: outgassing factor decays exponentially with time at temp
     if (wall_temp_K_ > cfg_.bakeout_temp_K - 10.f) {
         bakeout_elapsed_s_ += dt;
-        // Exponential decay of outgassing load (1 → 0.001 over ~12 h)
-        constexpr float tau = 12.f * 3600.f;  // 12 h
+        // Exponential decay of outgassing load (1 → 0.001 over the bakeout
+        // duration).  The tau is set to ~1/5 of the total bakeout duration so
+        // that by the end of bakeout the outgassing factor has dropped to
+        // ~0.001 (3 orders of magnitude reduction, matching real bakeout
+        // effectiveness).  With the 5-minute gameplay-compressed bakeout,
+        // tau = 1 minute — fast enough to see progress, slow enough that
+        // the operator can watch the vacuum pressure drop as bakeout proceeds.
+        constexpr float tau = 60.f;  // 1 min (matches 5-min bakeout duration)
         wall_outgas_factor_ = 0.001f + 0.999f * expf(-bakeout_elapsed_s_ / tau);
 
         if (bakeout_elapsed_s_ >= cfg_.bakeout_duration_s) {
@@ -166,10 +189,12 @@ void VacuumVesselSystem::checkBreach(float dt)
     if (breach_detected_) return;
 
     // Detect breach: pressure rising rapidly without pumps on, or rising
-    // above 1000 Pa unexpectedly during operation
-    static float prev_pressure = 101325.f;
-    float dP_dt = (pressure_Pa_ - prev_pressure) / std::max(dt, 1e-6f);
-    prev_pressure = pressure_Pa_;
+    // above 1000 Pa unexpectedly during operation.
+    //  Uses the member prev_pressure_Pa_ (reset to atmospheric in reset())
+    //  rather than a function-static — the static survived ReactorState
+    //  resets and caused false breach alarms on the first tick after RESET.
+    float dP_dt = (pressure_Pa_ - prev_pressure_Pa_) / std::max(dt, 1e-6f);
+    prev_pressure_Pa_ = pressure_Pa_;
 
     if (pressure_Pa_ > cfg_.breach_max_Pa
         && !roughing_on_ && !turbo_on_
@@ -195,8 +220,16 @@ void VacuumVesselSystem::update(ReactorState& state, const SimTime& t)
     else                          roughing_on_ = false;
     if (state.vessel_turbo_on)    turbo_on_    = true;
     else                          turbo_on_    = false;
-    if (state.vessel_bakeout_on)  bakeout_on_  = true;
-    else                          bakeout_on_  = false;
+    // Mirror operator commands from ReactorState → internal state.
+    //  For bakeout: respect the UI checkbox UNLESS bakeout has already
+    //  completed (bakeout_complete_).  Once complete, the UI checkbox may
+    //  still be on (the UI doesn't auto-uncheck), but we don't want to
+    //  re-trigger bakeout — the wall is already baked.  The operator can
+    //  force a re-bake by toggling the checkbox off and on again (which
+    //  would need a reset of bakeout_complete_ — for now, bakeout is a
+    //  one-shot per discharge cycle, which is realistic).
+    if (state.vessel_bakeout_on && !bakeout_complete_) bakeout_on_ = true;
+    else                                                bakeout_on_ = false;
 
     // Update bakeout (affects wall outgassing)
     updateBakeout(dt);
@@ -204,6 +237,17 @@ void VacuumVesselSystem::update(ReactorState& state, const SimTime& t)
     // Update boronization (if requested)
     if (state.boronization_in_progress) startBoronization();
     updateBoronization(dt);
+
+    // ── Apply DM-requested pressure rise (MGI gas injection) ────────────────
+    //  The DisruptionMitigation module writes state.dm_pressure_rise_Pa when
+    //  MGI or SPI fires.  We apply it to our internal pressure before the
+    //  pumping update, so the pumps start working down the elevated pressure.
+    //  This replaces the old direct write to state.vessel_pressure_Pa which
+    //  was overwritten by this update() every tick.
+    if (state.dm_pressure_rise_Pa > 0.f) {
+        forcePressureRise(state.dm_pressure_rise_Pa);
+        state.dm_pressure_rise_Pa = 0.f;  // consume the request
+    }
 
     // Plasma gas load: when plasma is running, it adds a small load to the
     // vessel (gas puffing + recycling).  Roughly proportional to fuel rate.

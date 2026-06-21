@@ -58,6 +58,13 @@ void ElectricalGridSystem::update(ReactorState& state, const SimTime& t,
         if (u.generator.breaker_closed) total_gen += u.generator.power_MW;
     }
 
+    // ── Write total generation BEFORE updateExportImport reads it ──────────
+    //  Previously total_gen was only written to state.gross_electric_MW at
+    //  the end of update(), but grid_.total_generation_MW (which
+    //  updateExportImport reads) was never set — so export/import were
+    //  always wrong (showing the full site load as imported).
+    grid_.total_generation_MW = total_gen;
+
     updateSiteLoads();
     updateFrequency(dt, total_gen);
     updateSynchCheck(turbines);
@@ -90,6 +97,15 @@ void ElectricalGridSystem::updateFrequency(float dt, float total_gen_MW)
         grid_.frequency_Hz  = std::clamp(grid_.frequency_Hz, 48.f, 52.f);
     }
 
+    // ── Advance grid phase for synchronisation checks ──────────────────────
+    //  The grid phase advances at 2π × f × dt.  Generators compare their
+    //  phase against this in updateSynchCheck.  The old code used
+    //  `grid_.frequency_Hz * 2π * 0.f` (always 0) for the grid phase, making
+    //  the synch check effectively random.
+    grid_.grid_phase_rad += 2.f * PI * grid_.frequency_Hz * dt;
+    grid_.grid_phase_rad = std::fmod(grid_.grid_phase_rad, 2.f * PI);
+    if (grid_.grid_phase_rad < 0.f) grid_.grid_phase_rad += 2.f * PI;
+
     grid_.frequency_deviation_Hz = grid_.frequency_Hz - FREQ_NOM;
     grid_.underfrequency_alarm   = (grid_.frequency_Hz < 49.f);
     grid_.overfrequency_alarm    = (grid_.frequency_Hz > 51.f);
@@ -98,17 +114,25 @@ void ElectricalGridSystem::updateFrequency(float dt, float total_gen_MW)
 
 void ElectricalGridSystem::updateSynchCheck(const TurbineSystem& turbines)
 {
-    // Check synchronisation conditions for each generator
+    // Check synchronisation conditions for each generator.
+    //  A generator can sync if:
+    //    - Frequency within 0.15 Hz of grid frequency
+    //    - Phase within 15° (0.26 rad) of grid phase
+    //    - Rotor speed above 2900 RPM (near synchronous speed)
+    //    - State is Synchronizing (ramping to match grid) or Online (already
+    //      synced — synch_ok should stay true so the UI shows "READY")
     for (int i = 0; i < 4; i++) {
         const auto& u = turbines.unit(i).s;
         float df    = std::abs(u.generator.frequency_Hz - grid_.frequency_Hz);
-        // Phase difference (wrap)
+        // Phase difference (wrap to [0, 2π))
         float dp    = std::fmodf(std::abs(u.generator.phase_rad
-                                  - grid_.frequency_Hz * 2.f * PI * 0.f), 2.f * PI);
+                                  - grid_.grid_phase_rad), 2.f * PI);
         dp = std::min(dp, 2.f * PI - dp);
-        // Synch OK: Δf < 0.15 Hz and Δφ < 15°
+        // Synch OK: Δf < 0.15 Hz and Δφ < 15° (0.26 rad)
         grid_.bus[i].synch_ok = (df < 0.15f && dp < 0.26f &&
-                                  u.rpm > 2900.f && u.state == TurbineState::Synchronizing);
+                                  u.rpm > 2900.f &&
+                                  (u.state == TurbineState::Synchronizing ||
+                                   u.state == TurbineState::Online));
     }
 }
 

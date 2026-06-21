@@ -26,6 +26,8 @@ void HCDSystem::reset()
     lhcd_setpoint_MW_ = 0.f;
     nbi_warmup_remaining_s_  = 0.f;
     lhcd_warmup_remaining_s_ = 0.f;
+    nbi_warmup_started_  = false;
+    lhcd_warmup_started_ = false;
     nbi_fault_  = false;
     icrh_fault_ = false;
     ecrh_fault_ = false;
@@ -64,42 +66,99 @@ void HCDSystem::clearFaults()
 void HCDSystem::distributeDemand(ReactorState& state)
 {
     // ── Distribute state.sp_aux_heat_MW across the enabled systems ──────────
-    //  Strategy: each enabled system is allocated power in proportion to its
-    //  setpoint cap (per-system max), capped by the per-system setpoint the
-    //  operator chose.  This means the operator can do things like "all aux
-    //  power from NBI" by disabling the other three, or "balanced mix" by
-    //  enabling all four with proportional setpoints.
     //
-    //  Disabled systems get 0 setpoint.  The ControlSystem's PID output
-    //  (state.sp_aux_heat_MW) is the *total* demand; we don't override the
-    //  operator's per-system setpoints, we just enforce that the sum of
-    //  setpoints doesn't exceed the demand (i.e. the operator can ask for
-    //  less than the PID output, but not more).
+    //  Two command paths feed into the H&CD systems:
     //
-    //  The actual MW delivered to each system is then ramp-limited in the
-    //  update() body below — this function only updates the per-system
-    //  *setpoints* based on the operator's enabled/ disabled config.
+    //  1. OPERATOR path: the UI sliders/presets write per-system setpoints
+    //     directly to state.hcd_*_setpoint_MW.  These are the operator's
+    //     "I want this much power from NBI/ICRH/ECRH/LHCD" commands.
+    //
+    //  2. CONTROLLER path: the ControlSystem's temperature PID writes a
+    //     *total* aux-heat demand to state.sp_aux_heat_MW.  This is the
+    //     "I need X MW of total heating to reach my T_e setpoint" command.
+    //
+    //  The two paths are reconciled here: each enabled system's setpoint is
+    //  the MINIMUM of (operator's per-system setpoint, PID-allocated share).
+    //  The PID-allocated share = sp_aux_heat_MW × (system's max / total max
+    //  of enabled systems).  This means:
+    //
+    //    - If the PID demands less than the operator asked for, the PID wins
+    //      (the plasma is hot enough — we don't need full operator power).
+    //    - If the PID demands more than the operator asked for, the operator
+    //      wins (the PID can't force a system past its setpoint cap).
+    //    - If the PID is at zero (T_e above setpoint), all systems ramp down.
+    //
+    //  This closes the temperature control loop: T_e error → PID output →
+    //  sp_aux_heat_MW → per-system setpoints → actual MW → P_aux in the
+    //  power balance → T_e.  Previously sp_aux_heat_MW was written but never
+    //  read, so the loop was open and T_e was uncontrolled.
 
-    // Sync operator commands from ReactorState (set by UI buttons/sliders)
-    // to the HCD system's internal state.  This is the "command path" — the
-    // UI writes to ReactorState.hcd_*, and we read it here.
+    // Sync operator enable/disable commands from ReactorState
     nbi_enabled_  = state.hcd_nbi_on;
     icrh_enabled_ = state.hcd_icrh_on;
     ecrh_enabled_ = state.hcd_ecrh_on;
     lhcd_enabled_ = state.hcd_lhcd_on;
 
-    nbi_setpoint_MW_  = std::clamp(state.hcd_nbi_setpoint_MW,  0.f, cfg_.nbi_max_MW);
-    icrh_setpoint_MW_ = std::clamp(state.hcd_icrh_setpoint_MW, 0.f, cfg_.icrh_max_MW);
-    ecrh_setpoint_MW_ = std::clamp(state.hcd_ecrh_setpoint_MW, 0.f, cfg_.ecrh_max_MW);
-    lhcd_setpoint_MW_ = std::clamp(state.hcd_lhcd_setpoint_MW, 0.f, cfg_.lhcd_max_MW);
+    // ── NBI/LHCD warmup: trigger on rising edge of enable ──────────────────
+    //  When the operator enables NBI (or LHCD) and the warmup timer is at
+    //  zero AND no actual power has been delivered yet, start the warmup
+    //  countdown.  This makes the "5 s NBI neutraliser" and "30 s LHCD
+    //  klystron filament" warmup times actually take effect.
+    if (nbi_enabled_ && nbi_warmup_remaining_s_ <= 0.f && nbi_actual_MW_ < 0.01f
+        && !nbi_warmup_started_) {
+        nbi_warmup_remaining_s_ = cfg_.nbi_warmup_s;
+        nbi_warmup_started_ = true;
+    }
+    if (lhcd_enabled_ && lhcd_warmup_remaining_s_ <= 0.f && lhcd_actual_MW_ < 0.01f
+        && !lhcd_warmup_started_) {
+        lhcd_warmup_remaining_s_ = cfg_.lhcd_warmup_s;
+        lhcd_warmup_started_ = true;
+    }
+    // Reset warmup-started flag when system is disabled, so re-enabling
+    // triggers a fresh warmup cycle.
+    if (!nbi_enabled_)  nbi_warmup_started_  = false;
+    if (!lhcd_enabled_) lhcd_warmup_started_ = false;
 
-    // If a system is disabled, force its setpoint to 0
-    if (!nbi_enabled_)  nbi_setpoint_MW_  = 0.f;
-    if (!icrh_enabled_) icrh_setpoint_MW_ = 0.f;
-    if (!ecrh_enabled_) ecrh_setpoint_MW_ = 0.f;
-    if (!lhcd_enabled_) lhcd_setpoint_MW_ = 0.f;
+    // Read operator per-system setpoints (clamped to per-system max)
+    float op_nbi  = std::clamp(state.hcd_nbi_setpoint_MW,  0.f, cfg_.nbi_max_MW);
+    float op_icrh = std::clamp(state.hcd_icrh_setpoint_MW, 0.f, cfg_.icrh_max_MW);
+    float op_ecrh = std::clamp(state.hcd_ecrh_setpoint_MW, 0.f, cfg_.ecrh_max_MW);
+    float op_lhcd = std::clamp(state.hcd_lhcd_setpoint_MW, 0.f, cfg_.lhcd_max_MW);
 
-    // If a system is faulted, force its setpoint to 0
+    // ── PID allocation: distribute sp_aux_heat_MW proportionally ───────────
+    //  Each enabled system gets a share proportional to its max capacity.
+    //  E.g. if NBI (16.5) and ECRH (24) are enabled and PID demands 20 MW,
+    //  NBI gets 20×16.5/40.5 = 8.1 MW, ECRH gets 20×24/40.5 = 11.9 MW.
+    float total_max = 0.f;
+    if (nbi_enabled_  && !nbi_fault_)  total_max += cfg_.nbi_max_MW;
+    if (icrh_enabled_ && !icrh_fault_) total_max += cfg_.icrh_max_MW;
+    if (ecrh_enabled_ && !ecrh_fault_) total_max += cfg_.ecrh_max_MW;
+    if (lhcd_enabled_ && !lhcd_fault_) total_max += cfg_.lhcd_max_MW;
+
+    float pid_demand = std::max(0.f, state.sp_aux_heat_MW);
+
+    if (total_max > 0.1f) {
+        if (nbi_enabled_  && !nbi_fault_)
+            nbi_setpoint_MW_  = std::min(op_nbi,  pid_demand * cfg_.nbi_max_MW  / total_max);
+        else                nbi_setpoint_MW_  = 0.f;
+        if (icrh_enabled_ && !icrh_fault_)
+            icrh_setpoint_MW_ = std::min(op_icrh, pid_demand * cfg_.icrh_max_MW / total_max);
+        else                icrh_setpoint_MW_ = 0.f;
+        if (ecrh_enabled_ && !ecrh_fault_)
+            ecrh_setpoint_MW_ = std::min(op_ecrh, pid_demand * cfg_.ecrh_max_MW / total_max);
+        else                ecrh_setpoint_MW_ = 0.f;
+        if (lhcd_enabled_ && !lhcd_fault_)
+            lhcd_setpoint_MW_ = std::min(op_lhcd, pid_demand * cfg_.lhcd_max_MW / total_max);
+        else                lhcd_setpoint_MW_ = 0.f;
+    } else {
+        // No systems enabled — all setpoints zero
+        nbi_setpoint_MW_  = 0.f;
+        icrh_setpoint_MW_ = 0.f;
+        ecrh_setpoint_MW_ = 0.f;
+        lhcd_setpoint_MW_ = 0.f;
+    }
+
+    // Faulted systems get 0 (redundant with the if-checks above, but explicit)
     if (nbi_fault_)  nbi_setpoint_MW_  = 0.f;
     if (icrh_fault_) icrh_setpoint_MW_ = 0.f;
     if (ecrh_fault_) ecrh_setpoint_MW_ = 0.f;
@@ -113,28 +172,12 @@ void HCDSystem::update(ReactorState& state, const SimTime& t)
     // Pull operator commands from ReactorState → HCD internal state
     distributeDemand(state);
 
-    // ── NBI warmup ──────────────────────────────────────────────────────────
-    //  NBI can't deliver power until the neutraliser gas fill is established
-    //  (~5 s after first enable).  Before that, the setpoint is forced to 0
-    //  even if the operator asked for power.
-    if (nbi_enabled_ && nbi_warmup_remaining_s_ > 0.f) {
+    // ── NBI warmup countdown ────────────────────────────────────────────────
+    //  The warmup timer is started by distributeDemand() on the rising edge
+    //  of the enable flag.  Here we just count it down and gate the
+    //  effective setpoint to 0 while warmup is in progress.
+    if (nbi_warmup_remaining_s_ > 0.f) {
         nbi_warmup_remaining_s_ = std::max(0.f, nbi_warmup_remaining_s_ - dt);
-    } else if (nbi_enabled_ && nbi_warmup_remaining_s_ <= 0.f) {
-        // Already warmed up — stay ready
-        nbi_warmup_remaining_s_ = 0.f;
-    }
-    // When NBI is first enabled, start the warmup timer
-    if (nbi_enabled_ && nbi_warmup_remaining_s_ <= 0.f && nbi_actual_MW_ < 0.01f) {
-        // Check if we need to start warmup (operator just turned it on)
-        // We detect "just turned on" by actual_MW being 0 and warmup being 0
-        // — this is a simplification; a real impl would track edge transitions.
-        // To avoid re-triggering warmup every tick when actual is 0, only
-        // trigger if warmup was never started (nbi_warmup_remaining_s_ == 0
-        // AND we haven't delivered power yet this discharge).
-        // For simplicity in this sim, we set warmup to its full duration
-        // when the operator enables NBI and warmup is at 0.
-        // (Handled in the UI: when operator clicks "Enable NBI", we set
-        //  warmup to cfg_.nbi_warmup_s.)
     }
     float nbi_effective_setpoint = nbi_setpoint_MW_;
     if (nbi_warmup_remaining_s_ > 0.f) {
@@ -142,8 +185,8 @@ void HCDSystem::update(ReactorState& state, const SimTime& t)
     }
     if (nbi_fault_) nbi_effective_setpoint = 0.f;
 
-    // ── LHCD warmup ─────────────────────────────────────────────────────────
-    if (lhcd_enabled_ && lhcd_warmup_remaining_s_ > 0.f) {
+    // ── LHCD warmup countdown ───────────────────────────────────────────────
+    if (lhcd_warmup_remaining_s_ > 0.f) {
         lhcd_warmup_remaining_s_ = std::max(0.f, lhcd_warmup_remaining_s_ - dt);
     }
     float lhcd_effective_setpoint = lhcd_setpoint_MW_;
@@ -187,12 +230,10 @@ void HCDSystem::update(ReactorState& state, const SimTime& t)
     state.hcd_nbi_current_drive_MA  = nbi_actual_MW_  * cfg_.nbi_eta_MA_per_MW;
     state.hcd_lhcd_current_drive_MA = lhcd_actual_MW_ * cfg_.lhcd_eta_MA_per_MW;
 
-    // Compute the bootstrap current fraction (volume-averaged, simplified)
-    // f_bs ≈ 0.3 · q · sqrt(R/a) · β_p
-    // We need β_p from the plasma state.  This is recomputed in the bridge
-    // (which has the geometry); we just mirror it here for UI display.
-    // (See PlasmaCoreBridge::updatePowerBalance for the actual calc.)
-    state.hcd_bootstrap_current_MA = 0.f;  // updated by bridge
+    // NOTE: state.hcd_bootstrap_current_MA is written by PlasmaCoreBridge
+    // (it needs β_p and q_safety which only the bridge has).  Do NOT write
+    // it here — doing so would overwrite the bridge's value with 0 every
+    // tick, which was the previous bug.
 
     // Set the aggregate alarm if any system is faulted
     state.alarm_aux_heat_fault = nbi_fault_ || icrh_fault_

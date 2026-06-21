@@ -79,7 +79,7 @@ void ControlSystem::update(ReactorState& state, const SimTime& t)
         // manual control via the rampdown ramps.  But still run safety
         // monitors so a quench or runaway is caught.
         runDisruptionWatch(state, dt);
-        runRunawayMonitor(state);
+        runRunawayMonitor(state, dt);
         return;
     }
 
@@ -88,7 +88,7 @@ void ControlSystem::update(ReactorState& state, const SimTime& t)
     runDensityControl    (state, dt);
     runShapeControl      (state, dt);
     runDisruptionWatch   (state, dt);
-    runRunawayMonitor    (state);
+    runRunawayMonitor    (state, dt);
 }
 
 // ─── Plasma Current PID ────────────────────────────────────────────────────────
@@ -203,13 +203,18 @@ void ControlSystem::runDisruptionWatch(ReactorState& state, float dt)
     //  gave beta_N values ~1000x too small — so the beta_limit check never
     //  fired, and the disruption-watch T_e clamp was effectively disabled.
     if (state.beta_N > cfg_.beta_limit) {
-        // Reduce heating / density setpoint to drop pressure
-        state.sp_electron_temp_keV *= 0.99f;
+        // Reduce T_e setpoint to drop pressure.  Use a dt-corrected
+        // exponential decay (rate 0.5/s) so the setpoint drops smoothly
+        // regardless of timestep.  The old code did `*= 0.99f` per tick —
+        // at 1 ms timestep that's 1000%/s, crashing T_e from 20 keV to
+        // 0.001 keV in 1 second of sim time.  Now it's a gentle 0.5/s
+        // decay: in 1 s, T_e drops by factor exp(-0.5) ≈ 0.61.
+        state.sp_electron_temp_keV *= std::exp(-0.5f * dt);
     }
 }
 
 // ─── Runaway Electron Monitor ─────────────────────────────────────────────────
-void ControlSystem::runRunawayMonitor(ReactorState& state)
+void ControlSystem::runRunawayMonitor(ReactorState& state, float dt)
 {
     // Loop electric field from Faraday's law: E_loop = V_loop / (2π * R)
     const float R = 6.2f; // major radius [m]
@@ -224,8 +229,13 @@ void ControlSystem::runRunawayMonitor(ReactorState& state)
         T_eV, coulomb_log);
 
     if (re.runaway_risk && re.growth_rate_s > 1e6f) {
-        // Significant runaway: increase density (higher collisionality) to suppress
-        state.sp_density_m3 = std::min(state.sp_density_m3 * 1.01f, 1.5e20f);
+        // Significant runaway: increase density (higher collisionality) to suppress.
+        //  Use a dt-corrected exponential growth (rate 0.5/s) capped at 1.5e20.
+        //  The old code did `*= 1.01f` per tick — at 1 ms timestep that's
+        //  1000%/s, slamming density to the cap in <1 s.  Now it's a gentle
+        //  0.5/s growth: in 1 s, density grows by factor exp(0.5) ≈ 1.65.
+        state.sp_density_m3 = std::min(
+            state.sp_density_m3 * std::exp(0.5f * dt), 1.5e20f);
     }
 }
 

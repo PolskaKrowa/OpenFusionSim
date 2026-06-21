@@ -31,8 +31,14 @@ void SteamPowerSystem::update(ReactorState& state, const SimTime& t)
     state.turbine_trip       = (turbine_rpm_ > cfg_.nominal_rpm * 1.1f)   // overspeed
                              || (steam_pressure_MPa_ > cfg_.nominal_pressure_MPa * 1.15f); // overpressure
 
-    // Scientific Q factor
-    float P_aux_MW = 50.0f; // NBI + ICRH auxiliary heating (fixed assumption)
+    // Scientific Q factor.
+    //  Use the actual auxiliary heating from the H&CD systems rather than the
+    //  old hardcoded 50 MW.  The PlasmaCoreBridge also computes Q_scientific
+    //  (and that's the value the UI actually displays, since the bridge runs
+    //  after SteamPower in the legacy update order), but we compute it here
+    //  too for consistency in case the legacy path is re-enabled.
+    float P_aux_MW = state.hcd_nbi_actual_MW + state.hcd_icrh_actual_MW
+                   + state.hcd_ecrh_actual_MW + state.hcd_lhcd_actual_MW;
     state.Q_scientific = (P_aux_MW > 0.1f)
                        ? state.fusion_power_MW / P_aux_MW : 0.0f;
 }

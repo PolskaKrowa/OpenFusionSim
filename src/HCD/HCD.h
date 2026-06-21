@@ -150,6 +150,11 @@ private:
     // Warmup timers (count down to zero; system can't deliver power until 0)
     float nbi_warmup_remaining_s_  = 0.f;
     float lhcd_warmup_remaining_s_ = 0.f;
+    // Warmup-started flags: set true when warmup is triggered, cleared when
+    // the system is disabled.  Prevents re-triggering warmup every tick while
+    // the system is enabled but hasn't delivered power yet.
+    bool  nbi_warmup_started_  = false;
+    bool  lhcd_warmup_started_ = false;
 
     // Latched fault flags + reason strings
     bool  nbi_fault_  = false;

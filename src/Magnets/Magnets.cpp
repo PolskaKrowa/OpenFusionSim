@@ -23,13 +23,39 @@ void MagnetSystem::update(ReactorState& state, const SimTime& t)
     runQPS       (state, t.dt_s);
     coolCryoplant(t.dt_s);
 
-    // Write aggregate outputs to state
+    // Write aggregate outputs to state.
+    //  All TF coils are in series (carry the same current), so reading
+    //  tf_coils_[0] is representative of all 18.  This is documented in
+    //  the MagnetConfig header.
     state.B_toroidal_T    = fieldOnAxis(tf_coils_[0].current_kA);
     state.magnet_temp_K   = tf_coils_[0].temp_K;
     state.stored_energy_GJ = 0.5f * cfg_.TF_stored_GJ
                            * (tf_coils_[0].current_kA / 68.0f)   // 68 kA nominal
                            * (tf_coils_[0].current_kA / 68.0f);
     state.coil_current_kA = tf_coils_[0].current_kA;
+
+    // ── Central Solenoid summary fields (H1) ────────────────────────────────
+    //  Sum the 6 CS module currents to get the total CS current, and estimate
+    //  the loop voltage from the CS current ramp rate.  The loop voltage is
+    //  what drives the plasma current via transformer action: V_loop = -dΦ/dt
+    //  where Φ = L_CS × I_CS.  With L_CS ≈ 6 H (ITER-class) and I_CS in kA:
+    //    V_loop = -L × dI/dt  [V]
+    //  Previously these fields were declared in ReactorState.h but never
+    //  written — the UI showed "CS Current: 0.0 kA" permanently.
+    float cs_total_kA = 0.f;
+    for (const auto& c : cs_coils_) cs_total_kA += c.current_kA;
+    state.cs_current_kA = cs_total_kA;
+    // Loop voltage: derivative of CS current × CS inductance.
+    //  Track previous-tick CS current to compute dI/dt.
+    constexpr float L_CS_H = 6.0f;  // ITER CS inductance [H]
+    float dI_cs_dt = (cs_total_kA - cs_current_prev_kA_) / std::max(t.dt_s, 1e-6f);
+    state.cs_loop_voltage_V = -L_CS_H * dI_cs_dt * 1e3f;  // kA→A: ×1e3
+    cs_current_prev_kA_ = cs_total_kA;
+    // PF coil current (simplified: assume PF mirrors CS for shape control)
+    state.pf_current_kA = cs_total_kA * 0.5f;
+    // CS flux remaining: ITER CS has ~90 Wb swing; decreases as CS ramps up
+    state.cs_flux_remaining_Wb = std::max(0.f, 90.f - cs_total_kA * 2.0f);
+
     state.quench_detected = dump_triggered_;
     state.alarm_quench    = dump_triggered_;
 }
@@ -76,19 +102,30 @@ void MagnetSystem::updateCSCoil(ReactorState& state, float dt)
         c.temp_K -= (c.temp_K - cfg_.T_op_K) * 0.1f * dt;
     }
 
-    // Approximate induced loop voltage
-    float dI_dt = (cs_coils_[0].current_kA - target_kA) / dt;
-    state.B_poloidal_T = cs_coils_[0].current_kA / 45.0f * 6.0f; // peak ~6 T at 45 kA
-    (void)dI_dt;
+    // Poloidal field from CS current (peak ~6 T at 45 kA).
+    //  This is the only field written here — the loop voltage is now computed
+    //  in update() from the CS current ramp rate (using cs_current_prev_kA_).
+    //  The old code computed a dead `dI_dt` here and discarded it via (void).
+    state.B_poloidal_T = cs_coils_[0].current_kA / 45.0f * 6.0f;
 }
 
 void MagnetSystem::runQPS(ReactorState& state, float dt)
 {
-    // Quench detection: any coil exceeding T_critical or developing resistance
+    // Quench detection: any TF or CS coil exceeding T_critical.
+    //  Previously only TF coils were checked — a CS quench was never
+    //  detected even though CS coils carry significant current and can
+    //  quench under abnormal conditions.
     for (auto& c : tf_coils_) {
         if (c.temp_K > cfg_.T_critical_K * 0.9f && !c.quenched) {
             c.quenched        = true;
             c.resistance_uOhm = 1000.0f; // transition to normal state
+            dump_triggered_   = true;
+        }
+    }
+    for (auto& c : cs_coils_) {
+        if (c.temp_K > cfg_.T_critical_K * 0.9f && !c.quenched) {
+            c.quenched        = true;
+            c.resistance_uOhm = 1000.0f;
             dump_triggered_   = true;
         }
     }
@@ -162,4 +199,5 @@ void MagnetSystem::reset()
     dump_triggered_   = false;
     cryo_load_W_      = 0.0f;
     current_ramp_rate_ = 0.0f;
+    cs_current_prev_kA_ = 0.0f;
 }
