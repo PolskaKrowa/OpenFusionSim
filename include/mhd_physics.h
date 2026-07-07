@@ -85,6 +85,14 @@ struct MHDState {
     // Diagnostics
     float q0 = 1.0f;               // on-axis q
     float q95 = 3.0f;              // q at 95% flux
+    //  Geometry shaping factor applied to the cylindrical q-profile
+    //  (elongation/triangularity/aspect corrections, Uckan form).  Set by
+    //  the caller each tick; ≈1.9-2.6 for ITER-class shapes.  With this,
+    //  the q-profile, resonant-surface radii, q0, and q95 are all in REAL
+    //  q units — previously the whole MHD subsystem worked in cylindrical
+    //  q (a factor ~2.6 low), so the q=2 surface sat at the wrong radius
+    //  and downstream corrections had to patch q95 after the fact.
+    float q_shape_factor = 1.9f;
     float li = 0.8f;               // internal inductance
     bool  vde_triggered = false;
     bool  disruption_imminent = false;
@@ -126,8 +134,18 @@ inline void computeQProfile(MHDState& mhd, const RadialMesh& mesh,
         float dr = mesh.dr;
         // Trapezoidal integration of j·2π·r·dr
         I_enc += mhd.j_phi[i] * 2.0f * PI * r * dr;
+        //  Evaluate q at the OUTER edge of the accumulated region.  With
+        //  cell-centred midpoint summation, Σ 2π·r_c·dr over cells 0..i is
+        //  exactly π·r_out² — so pairing I_enc with r_out makes the
+        //  discrete q exact for a flat profile.  Pairing it with the cell
+        //  CENTRE (as before) over-counted the axis cell's enclosed
+        //  current 4×, reporting q₀ at a quarter of its true value and
+        //  triggering spurious sawtooth activity.
+        float r_out = (i + 1) * dr;
         if (I_enc > 1.0f) {
-            mhd.q_profile[i] = (2.0f * PI * r * r * B_T) / (MU0 * R_major * I_enc);
+            mhd.q_profile[i] = (2.0f * PI * r_out * r_out * B_T)
+                             / (MU0 * R_major * I_enc)
+                             * mhd.q_shape_factor;
         } else {
             mhd.q_profile[i] = 100.0f;
         }
@@ -237,6 +255,19 @@ inline void updateTearingMode(MHDState::TearingMode& tm,
         tm.W = 0.0f;
         return;
     }
+    //  ── Radial validity gate ────────────────────────────────────────────
+    //  Wall-locking tearing modes live at mid-to-outer radius.  A resonant
+    //  surface hugging the axis (the q₀ ≈ m/n sweep during every current
+    //  ramp) is not a locked-mode driver — and the Δ' estimator diverges
+    //  as 1/r_s there, reading +700/m purely from geometry.  Surfaces
+    //  right at the edge couple to the separatrix, outside this model's
+    //  validity.  Track islands only for r_s/a ∈ [0.30, 0.92]; otherwise
+    //  let any existing island decay.
+    if (tm.r_s < 0.30f * mesh.a || tm.r_s > 0.92f * mesh.a) {
+        tm.W *= std::exp(-dt / 0.1f);
+        tm.disruptive = false;
+        return;
+    }
 
     // Local resistivity at r_s (Spitzer, using T_e at that radius)
     int i_s = (int)(tm.r_s / mesh.dr);
@@ -249,14 +280,35 @@ inline void updateTearingMode(MHDState::TearingMode& tm,
     // Recompute Δ' (it changes as j(r) evolves)
     tm.Delta_prime = tearingDeltaPrime(mhd.j_phi, mesh, tm.r_s, (int)tm.m);
 
-    // dW/dt = (η/μ_0) · Δ'    [Rutherford 1973]
-    // Note: this is the LINEAR island width; nonlinear saturation is
-    // approximated by capping W at 0.4·a.
-    if (tm.Delta_prime > 0.0f) {
-        tm.W += (eta / MU0) * tm.Delta_prime * dt;
-    } else {
-        // Stable: island decays
-        tm.W *= std::exp(-dt / 0.1f);   // 100ms decay timescale
+    // dW/dt = 1.22·(η/μ_0)·[Δ'_eff − α/W]    [modified Rutherford]
+    //
+    //  CALIBRATION: the Fitzpatrick-style Δ' estimator on a 64-cell
+    //  profile reads ≈ +41/m for a textbook-STABLE parabolic profile at
+    //  inner radii — its absolute value is meaningless, only deviations
+    //  from a healthy profile carry signal.  Subtract the measured
+    //  parabolic baseline B(x), x = r_s/a:
+    //      B(x) ≈ 1.64/x² − 0.5 − 16·x⁶
+    //  (fit to the estimator's own output for j ∝ 1−r²/a²).  A healthy
+    //  profile then gives Δ'_eff ≈ 0 → stable; a genuinely distorted
+    //  profile (post-crash steps, strong off-axis drive) exceeds it.
+    //
+    //  The α/W term is the standard small-island stabilisation (curvature
+    //  + polarisation): islands below ~1-2 cm cannot grow regardless of
+    //  Δ'.  Together these stop the old behaviour where every current
+    //  ramp nucleated a saturated 0.8 m island out of nothing and
+    //  permanently latched "disruptive".
+    {
+        float x = std::clamp(tm.r_s / mesh.a, 0.05f, 1.0f);
+        float baseline = 1.64f / (x * x) - 0.5f - 16.0f * x * x * x * x * x * x;
+        float Dp_eff = tm.Delta_prime - baseline;
+        constexpr float ALPHA_STAB = 0.06f;   // small-island stabilisation
+        float W_eff = std::max(tm.W, 0.005f); // 5 mm nucleation floor
+        float drive = Dp_eff - ALPHA_STAB / W_eff;
+        if (drive > 0.0f) {
+            tm.W += 1.22f * (eta / MU0) * drive * dt;
+        } else {
+            tm.W *= std::exp(-dt / 0.1f);   // stable/sub-threshold: decay
+        }
     }
 
     // Cap at 40% of minor radius (saturation)
@@ -287,11 +339,24 @@ inline void diffuseCurrent(MHDState& mhd, const RadialMesh& mesh, float dt)
 
     std::vector<float> j_new = mhd.j_phi;
 
+    //  ── CFL stability clamp ────────────────────────────────────────────────
+    //  This is an EXPLICIT diffusion scheme: stability requires
+    //      D·dt/Δr² ≤ 1/2,   D = η/μ₀.
+    //  A cold cell (T_e < 10 eV) has η clamped to 1e9 Ω·m, i.e. a
+    //  diffusivity ~8×10¹⁴ m²/s — 15 orders of magnitude past the limit —
+    //  which detonated the edge cells each tick and corrupted the whole
+    //  q-profile (the renormalisation then dragged q95 down ~6×, firing
+    //  spurious low-q disruptions during every current ramp).  Capping the
+    //  face diffusivity keeps the scheme unconditionally stable: cold
+    //  regions simply diffuse "as fast as the mesh allows", which is the
+    //  physically sensible saturated behaviour for this resolution.
+    const float eta_cfl_max = 0.4f * MU0 * mesh.dr * mesh.dr / std::max(dt, 1e-9f);
+
     for (int i = 1; i < mesh.N - 1; i++) {
         float r = mesh.r(i);
-        float eta_i   = spitzerResistivity(mhd.T_e_keV[i]);
-        float eta_ip  = spitzerResistivity(mhd.T_e_keV[i+1]);
-        float eta_im  = spitzerResistivity(mhd.T_e_keV[i-1]);
+        float eta_i   = std::min(spitzerResistivity(mhd.T_e_keV[i]),   eta_cfl_max);
+        float eta_ip  = std::min(spitzerResistivity(mhd.T_e_keV[i+1]), eta_cfl_max);
+        float eta_im  = std::min(spitzerResistivity(mhd.T_e_keV[i-1]), eta_cfl_max);
         float eta_half_p = 0.5f * (eta_i + eta_ip);
         float eta_half_m = 0.5f * (eta_i + eta_im);
 

@@ -53,8 +53,11 @@ void MagnetSystem::update(ReactorState& state, const SimTime& t)
     cs_current_prev_kA_ = cs_total_kA;
     // PF coil current (simplified: assume PF mirrors CS for shape control)
     state.pf_current_kA = cs_total_kA * 0.5f;
-    // CS flux remaining: ITER CS has ~90 Wb swing; decreases as CS ramps up
-    state.cs_flux_remaining_Wb = std::max(0.f, 90.f - cs_total_kA * 2.0f);
+    // NOTE: state.cs_flux_remaining_Wb is owned by PlasmaCoreBridge, which
+    // integrates the actual resistive volt-second consumption (V_loop ×
+    // inductive current fraction).  The old static formula here (90 − 2·I_CS)
+    // made the flux budget a function of the instantaneous CS current rather
+    // than a consumable resource, so pulse length was never actually limited.
 
     state.quench_detected = dump_triggered_;
     state.alarm_quench    = dump_triggered_;

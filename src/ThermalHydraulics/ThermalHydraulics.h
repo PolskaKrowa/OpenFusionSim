@@ -73,4 +73,11 @@ private:
     float thermal_power_MW_  = 0.0f;
     float flow_kg_s_         = 0.0f;
     float tbr_current_       = 0.0f;
+
+    // ── Neutron damage accountancy (campaign-lifetime, cleared on reset) ────
+    //  Integrated neutron wall load [MW·a/m²] and the resulting displacement
+    //  damage in the first-wall steel [dpa].  ~10 dpa per MW·a/m² for RAFM
+    //  steel under a 14 MeV DT spectrum.
+    float fw_fluence_MWa_m2_ = 0.0f;
+    float fw_dpa_            = 0.0f;
 };

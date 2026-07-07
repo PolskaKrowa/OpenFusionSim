@@ -28,8 +28,14 @@ struct SaltPump {
 };
 
 struct SaltTank {
-    float temp_K         = 700.f;
-    float level_m        = 8.f;     // normal 8 m; max 16 m
+    //  temp_K and level_m are DOUBLE, not float: with a ~1.2e6 kg salt
+    //  inventory and 1 ms ticks, the per-tick temperature increment
+    //  (~9e-5 K) is smaller than the float ULP at ~860 K (~1e-4 K), so a
+    //  float accumulator silently stops integrating — the hot tank froze
+    //  at whatever temperature it first reached and "heating from core
+    //  heat" appeared completely broken.
+    double temp_K         = 700.0;
+    double level_m        = 8.0;    // normal 8 m; max 16 m
     float capacity_m3    = 2000.f;  // volume per metre of level (~250 m² floor)
     float salt_rho       = 1940.f;  // FLiBe density [kg/m³]
     bool  hi_level_alarm = false;
@@ -61,9 +67,12 @@ struct MoltenSaltState {
     // Computed: heat delivered to each SG [MW]
     float sg_heat_MW[4]     = {};
 
+    // Blanket circulation outlet temperature (hot leg into the hot tank) [K]
+    float blanket_outlet_K  = 700.f;
+
     // Salt temperatures at SG inlets and outlets
     float sg_salt_inlet_K[4]  = {850.f,850.f,850.f,850.f};
-    float sg_salt_outlet_K[4] = {600.f,600.f,600.f,600.f};
+    float sg_salt_outlet_K[4] = {800.f,800.f,800.f,800.f};
 };
 
 class MoltenSaltSystem {
@@ -113,4 +122,8 @@ private:
     MoltenSaltState s_;
     static constexpr float CP_SALT = 2415.f;   // FLiBe cp [J/(kg·K)]
     static constexpr float T_FREEZE = 733.f;    // FLiBe freeze point [K]
+    static constexpr float BCP_CAPACITY_KG_S    = 800.f;   // per blanket circ pump
+    static constexpr float TANK_FLOOR_M2        = 80.f;    // salt tank floor area
+    static constexpr float HOTLEG_CAPACITY_KG_S = 1500.f;  // per hotleg pump
+    static constexpr float COLDLEG_CAPACITY_KG_S= 1400.f;  // per coldleg pump
 };

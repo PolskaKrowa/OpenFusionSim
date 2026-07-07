@@ -85,6 +85,7 @@ public:
 
     // Enable / disable auto-MGI
     void enableAutoMGI(bool on) { cfg_.auto_mgi_enabled = on; }
+    bool autoMGIEnabled() const { return cfg_.auto_mgi_enabled; }
 
     // Diagnostic accessors
     bool  mgiArmed()  const { return mgi_armed_; }

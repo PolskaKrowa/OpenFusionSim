@@ -24,6 +24,8 @@ void ThermalHydraulics::reset()
     thermal_power_MW_  = 0.0f;
     flow_kg_s_         = 0.0f;
     tbr_current_       = 0.0f;
+    fw_fluence_MWa_m2_ = 0.0f;
+    fw_dpa_            = 0.0f;
 }
 
 void ThermalHydraulics::update(ReactorState& state, const SimTime& t)
@@ -62,8 +64,36 @@ void ThermalHydraulics::updateFirstWall(ReactorState& state, float dt)
     float Q_out   = h_conv * cfg_.first_wall_area_m2 * (first_wall_temp_K_ - coolant_inlet_K_);
 
     first_wall_temp_K_ += (Q_in - Q_out) / C_wall * dt;
+
+    // ── Runaway-electron wall strike ─────────────────────────────────────────
+    //  A post-disruption RE beam deposits its magnetic energy (hundreds of
+    //  MJ) on a ~2% wetted patch of the wall, not spread over all 700 m².
+    //  The localized spot flash-heats — a 300 MJ strike raises the patch by
+    //  ~400 K, easily enough to trip the first-wall SCRAM limit and cost the
+    //  operator the restart time.  This is the punishment for letting a
+    //  high-current discharge disrupt unmitigated.
+    if (state.re_wall_energy_MJ > 0.0f) {
+        constexpr float STRIKE_AREA_FRAC = 0.02f;
+        first_wall_temp_K_ += state.re_wall_energy_MJ * 1e6f
+                            / (C_wall * STRIKE_AREA_FRAC);
+        state.re_wall_energy_MJ = 0.0f;   // consumed
+    }
+
     first_wall_temp_K_  = std::max(first_wall_temp_K_, coolant_inlet_K_);
-    (void)state;
+
+    // ── Neutron wall load + displacement damage ─────────────────────────────
+    //  The 14.07 MeV neutron flux through the first wall drives material
+    //  damage measured in dpa.  RAFM steel accumulates ~10 dpa per MW·a/m²;
+    //  the ITER first wall is designed for a ~1-3 dpa lifetime.  The counter
+    //  accumulates over the whole campaign — it is the long-term "wear
+    //  meter" of the machine.
+    float P_neutron_MW = state.fusion_power_MW * (14.07f / 17.59f);
+    state.neutron_wall_load_MW_m2 = P_neutron_MW / cfg_.first_wall_area_m2;
+    constexpr float SECONDS_PER_YEAR = 3.156e7f;
+    fw_fluence_MWa_m2_ += state.neutron_wall_load_MW_m2 * dt / SECONDS_PER_YEAR;
+    fw_dpa_             = 10.0f * fw_fluence_MWa_m2_;
+    state.fw_fluence_MWa_m2 = fw_fluence_MWa_m2_;
+    state.fw_dpa            = fw_dpa_;
 }
 
 void ThermalHydraulics::updateBlanket(ReactorState& state, float dt)

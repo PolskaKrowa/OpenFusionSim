@@ -185,6 +185,19 @@ void HCDSystem::update(ReactorState& state, const SimTime& t)
     }
     if (nbi_fault_) nbi_effective_setpoint = 0.f;
 
+    // ── NBI shine-through interlock ─────────────────────────────────────────
+    //  A 1 MeV neutral beam is ionized by collisions with the plasma; at low
+    //  line density the beam isn't stopped before it crosses the vessel and
+    //  slams into the far wall at ~10 MW/m² (ITER's beams would melt their
+    //  own beam dumps in seconds).  Real machines interlock the injectors on
+    //  a minimum density — modelled here as a hard gate at 1.5×10¹⁹ m⁻³.
+    //  Practical consequence for the operator: build density with gas puff /
+    //  pellets (and heat with ECRH/ICRH/ohmic) BEFORE bringing on the beams.
+    constexpr float NBI_MIN_DENSITY_M3 = 1.5e19f;
+    bool shine_block = state.plasma_density_m3 < NBI_MIN_DENSITY_M3;
+    state.nbi_shinethrough_block = shine_block;
+    if (shine_block) nbi_effective_setpoint = 0.f;
+
     // ── LHCD warmup countdown ───────────────────────────────────────────────
     if (lhcd_warmup_remaining_s_ > 0.f) {
         lhcd_warmup_remaining_s_ = std::max(0.f, lhcd_warmup_remaining_s_ - dt);
@@ -219,12 +232,17 @@ void HCDSystem::update(ReactorState& state, const SimTime& t)
     state.hcd_ecrh_actual_MW  = ecrh_actual_MW_;
     state.hcd_lhcd_actual_MW  = lhcd_actual_MW_;
 
-    // Mirror setpoints back so the UI sees what the HCD module is actually
-    // trying to deliver (after warmup / fault gating).
-    state.hcd_nbi_setpoint_MW  = nbi_setpoint_MW_;
-    state.hcd_icrh_setpoint_MW = icrh_setpoint_MW_;
-    state.hcd_ecrh_setpoint_MW = ecrh_setpoint_MW_;
-    state.hcd_lhcd_setpoint_MW = lhcd_setpoint_MW_;
+    // ── Do NOT mirror the reconciled setpoints back into ReactorState ───────
+    //  BUG FIX: this used to write min(operator setpoint, PID share) back
+    //  into state.hcd_*_setpoint_MW — the same fields the operator's sliders
+    //  live in.  That made the reconciliation a RATCHET: any tick where the
+    //  temperature PID demanded less than the operator (e.g. T_e briefly
+    //  above its setpoint → PID output 0) permanently overwrote the
+    //  operator's command with 0, and since the PID share is min'ed against
+    //  the (now zero) operator value, the heating could never come back.
+    //  The operator fields stay untouched; the reconciled values live in the
+    //  module-internal *_setpoint_MW_ members and the delivered power is
+    //  visible through hcd_*_actual_MW.
 
     // Current drive contributions (only NBI and LHCD deliver meaningful CD)
     state.hcd_nbi_current_drive_MA  = nbi_actual_MW_  * cfg_.nbi_eta_MA_per_MW;

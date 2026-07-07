@@ -40,12 +40,23 @@ void DisruptionMitigationSystem::fireMitigation(ReactorState& state)
         state.mgi_pressure_Pa = cfg_.mgi_pressure_rise_Pa;
         state.mitigation_force_N = state.plasma_current_MA * 1e6f
                                  * cfg_.mgi_halo_reduction;
+        // ── The actual mitigation physics ────────────────────────────────
+        //  MGI works by flooding the plasma with a strong radiator (Ne/Ar):
+        //  the injected impurity drives a radiative thermal quench through
+        //  the line-radiation model in PlasmaCoreBridge.  Previously the
+        //  module just flipped plasma_status for 1 ms and the bridge
+        //  cleared the flag next tick — the plasma survived an MGI shot
+        //  completely unharmed.
+        state.dm_injected_impurity += 0.25f;   // massive Ne/Ar dose
+        state.plasma_density_m3    *= 1.5f;    // injected neutrals fuel up
+        state.dm_mitigated = true;             // gentle current quench
         // Request a pressure rise in the vessel.  VacuumVessel::update will
         // pick this up via forcePressureRise() and apply it to its internal
         // pressure_Pa_.  Previously we wrote state.vessel_pressure_Pa
         // directly here, but VacuumVessel::update overwrote it next tick.
         state.dm_pressure_rise_Pa = cfg_.mgi_pressure_rise_Pa;
         pumpdown_remaining_s_ = cfg_.post_mitigation_pumpdown_s;
+        time_since_fire_s_ = 0.f;
     } else if (fire_spi) {
         spi_fired_ = true;
         mitigation_active_ = true;
@@ -55,11 +66,21 @@ void DisruptionMitigationSystem::fireMitigation(ReactorState& state)
         state.spi_pellet_mass_g = cfg_.spi_pellet_mass_g;
         state.mitigation_force_N = state.plasma_current_MA * 1e6f
                                  * cfg_.spi_halo_reduction;
+        //  SPI: Ne-doped shattered D2 pellet — deeper penetration, better
+        //  assimilation than MGI (denser radiator per mole injected) plus
+        //  a large density rise from the deuterium fragments, which
+        //  collisionally cools the plasma as well as radiating.
+        state.dm_injected_impurity += 0.30f;
+        state.plasma_density_m3    *= 2.0f;
+        state.dm_mitigated = true;
         // SPI injects less gas than MGI (deuterium pellets, not noble gas)
         state.dm_pressure_rise_Pa = cfg_.mgi_pressure_rise_Pa * 0.3f;
         pumpdown_remaining_s_ = cfg_.post_mitigation_pumpdown_s * 0.3f;
+        time_since_fire_s_ = 0.f;
     }
-    time_since_fire_s_ = 0.f;
+    //  NOTE: time_since_fire_s_ is only reset when a system actually fired
+    //  (it used to reset unconditionally, so clicking FIRE with nothing
+    //  armed lied about the last-fire time).
 }
 
 void DisruptionMitigationSystem::update(ReactorState& state, const SimTime& t)
@@ -68,14 +89,29 @@ void DisruptionMitigationSystem::update(ReactorState& state, const SimTime& t)
 
     time_since_fire_s_ += dt;
 
-    // Mirror armed state to ReactorState for UI
-    state.mgi_armed = mgi_armed_;
-    state.spi_armed = spi_armed_;
+    // ── Arm state: the UI checkboxes are the source of truth ────────────────
+    //  The operator arms/disarms via ImGui::Checkbox on state.mgi_armed /
+    //  state.spi_armed.  The old code did the OPPOSITE — it overwrote the
+    //  state flags from the (never-set) internals every tick, so ticking
+    //  "Arm MGI" was reverted one frame later and neither system could
+    //  ever be armed.
+    mgi_armed_ = state.mgi_armed;
+    spi_armed_ = state.spi_armed;
+    // Fired latches flow the other way (module → UI lamps)
+    state.mgi_fired = mgi_fired_;
+    state.spi_fired = spi_fired_;
 
-    // ── Auto-MGI: fire if q_95 drops below threshold ────────────────────────
+    // ── Auto-MGI enable follows the (persistent) UI flag ────────────────────
+    cfg_.auto_mgi_enabled = state.dm_auto_mgi;
+
+    // ── Auto-MGI: fire on detected disruption or q_95 threshold ─────────────
+    //  This is the whole point of auto-mitigation: the machine-protection
+    //  system reacts faster than any operator can.  Fires on either an
+    //  actual disruption flag or the q_95 precursor threshold.
     if (cfg_.auto_mgi_enabled && mgi_armed_ && !mgi_fired_
-        && state.q_safety < cfg_.auto_mgi_q_threshold
-        && state.plasma_current_MA > 1.0f) {
+        && state.plasma_current_MA > 1.0f
+        && (state.disruption_flag
+            || state.q_safety < cfg_.auto_mgi_q_threshold)) {
         fireMitigation(state);
     }
 
@@ -85,21 +121,14 @@ void DisruptionMitigationSystem::update(ReactorState& state, const SimTime& t)
         state.cmd_disrupt_mitigation = false;  // consume the command
     }
 
-    // ── Active mitigation: thermal quench in progress ───────────────────────
+    // ── Active mitigation: injection window in progress ─────────────────────
+    //  The thermal quench itself now happens through the radiation physics
+    //  in PlasmaCoreBridge (the injected radiator collapses T_e); here we
+    //  just track the injection window for the UI.
     if (mitigation_active_) {
         mitigation_remaining_s_ -= dt;
         if (mitigation_remaining_s_ <= 0.f) {
             mitigation_active_ = false;
-            // Force plasma into disruption / quench — the mitigation has
-            // done its job (radiatively cooled the plasma), now the plasma
-            // is gone.  PlasmaCoreBridge will pick up that I_p should be
-            // quenched on the next tick.
-            state.plasma_status = PlasmaStatus::Disrupting;
-            state.disruption_flag = true;
-            state.disruption_cause = DisruptionCause::None;  // operator-initiated
-        } else {
-            // During the thermal quench, force plasma to disrupting
-            state.plasma_status = PlasmaStatus::Disrupting;
         }
     }
 

@@ -20,6 +20,7 @@
 
 // ── FusionSim ─────────────────────────────────────────────────────────────────
 #include "ReactorState.h"
+#include "confinement_physics.h"   // POPCON operating-space tab reuses the 0D physics
 #include "SimTime.h"
 #include "Control/Control.h"
 #include "Magnets/Magnets.h"
@@ -352,9 +353,17 @@ static void RenderStatusBar(const ReactorState& s,const SimTime& t,
         case PlasmaStatus::Disrupting:ps="DISRUPTION";pc=Col::RED;  break;
         case PlasmaStatus::Quenched:  ps="QUENCHED";  pc=Col::RED;  break;default:break;}
     ImGui::TextColored(pc,"%-11s",ps); ImGui::SameLine(350.f);
-    ImGui::TextColored(Col::GREEN,  "P_fus %.0f MW",  s.fusion_power_MW);   ImGui::SameLine(490.f);
-    ImGui::TextColored(Col::YELLOW, "P_net %.0f MW",  s.net_electric_MW);   ImGui::SameLine(630.f);
-    ImGui::TextColored(Col::CYAN,   "Q=%.2f",         s.Q_scientific);      ImGui::SameLine(730.f);
+    // Confinement regime chip — H-mode is the money regime, L-mode is amber
+    // as a nudge that the operator is paying double on confinement.
+    if(s.plasma_status==PlasmaStatus::Burning||s.plasma_status==PlasmaStatus::Initiating){
+        ImGui::TextColored(s.h_mode?Col::GREEN:Col::AMBER, s.h_mode?"[H]":"[L]");
+    } else {
+        ImGui::TextColored(Col::GREY,"[-]");
+    }
+    ImGui::SameLine(395.f);
+    ImGui::TextColored(Col::GREEN,  "P_fus %.0f MW",  s.fusion_power_MW);   ImGui::SameLine(520.f);
+    ImGui::TextColored(Col::YELLOW, "P_net %.0f MW",  s.net_electric_MW);   ImGui::SameLine(650.f);
+    ImGui::TextColored(Col::CYAN,   "Q=%.2f",         s.Q_scientific);      ImGui::SameLine(745.f);
     ImGui::TextColored(s.grid_frequency_Hz<49.f?Col::AMBER:Col::GREEN,
                        "f=%.2f Hz", s.grid_frequency_Hz);                    ImGui::SameLine(840.f);
     ImGui::TextColored(paused?Col::AMBER:Col::GREEN,paused?"■■ PAUSE":"▶ %.0fx",speed); ImGui::SameLine(960.f);
@@ -437,6 +446,11 @@ static void RenderLeftPanel(ReactorState& s,SimTime& t,
                 s.plasma_status=PlasmaStatus::Initiating;
                 s.plasma_current_MA=0.5f;s.electron_temp_keV=3.f;
                 s.plasma_density_m3=5e18f;s.mode=ReactorMode::Startup;
+                // Clear the previous discharge's runaway-electron latches —
+                // the strike counter (re_strike_count) survives as the
+                // campaign damage record, but the alarm belongs to the shot
+                // that caused it.
+                s.re_wall_strike=false;s.re_beam_MA=0.f;s.alarm_runaway=false;
                 // ── Auto-enable ECRH for breakdown assist ──────────────────────
                 //  In a real tokamak, ECRH is used to pre-ionize the gas before
                 //  the loop voltage is applied — this lowers the breakdown
@@ -499,7 +513,9 @@ static void RenderLeftPanel(ReactorState& s,SimTime& t,
     float pct = s.sp_fuel_rate * 100.f;
     if (ImGui::SliderFloat("##gp", &pct, 0.f, 100.f, "Gas: %.0f%%"))
         s.sp_fuel_rate = pct / 100.f;
-    ImGui::SetNextItemWidth(pw);ImGui::SliderFloat("##pf",&s.pellet_frequency_Hz,0.f,10.f,"Pellets: %.1f Hz");
+    // Pellet injector doubles as the ELM pacing actuator — range extended to
+    // 20 Hz so the operator can outrun the natural Type-I ELM frequency.
+    ImGui::SetNextItemWidth(pw);ImGui::SliderFloat("##pf",&s.pellet_frequency_Hz,0.f,20.f,"Pellets: %.1f Hz");
     float hw=(pw-4.f)*0.5f;
     if(ImGui::Button("+D2",{hw,0.f}))fuel.resupplyDeuterium(100.f);ImGui::SameLine();
     if(ImGui::Button("+T",{hw,0.f})) fuel.resupplyTritium(25.f);
@@ -530,7 +546,8 @@ static void RenderLeftPanel(ReactorState& s,SimTime& t,
 // OVERVIEW TAB  (plasma + alarms in one pane)
 // ═══════════════════════════════════════════════════════════════════════════════
 static void TabOverview(const ReactorState& s,
-                         ScrollBuf& h_pfus,ScrollBuf& h_te,ScrollBuf& h_ne,ScrollBuf& h_q,
+                         ScrollBuf& h_pfus,ScrollBuf& h_te,ScrollBuf& h_ti,
+                         ScrollBuf& h_ne,ScrollBuf& h_q,
                          AlarmSystem& alm,const SimTime& t)
 {
     float pw=ImGui::GetContentRegionAvail().x;
@@ -542,10 +559,61 @@ static void TabOverview(const ReactorState& s,
         Row("Electron Temp",    s.electron_temp_keV,   "%.1f","keV",Col::AMBER);
         Row("Ion Temp",         s.plasma_temp_keV,     "%.1f","keV",Col::AMBER);
         Row("Density",          s.plasma_density_m3,   "%.2e","m-3",Col::CYAN);
+        ImVec4 gwc=(s.greenwald_frac>1.0f)?Col::RED:(s.greenwald_frac>0.85f)?Col::AMBER:Col::GREEN;
+        Row("Greenwald Fraction",s.greenwald_frac,     "%.2f","",  gwc);
         Row("Safety Factor q95",s.q_safety,            "%.3f","",  qc);
         Row("Beta (normalized)",s.beta*100.f,          "%.3f","%");
         Row("Beta_N (Troyon)",  s.beta_N,              "%.2f","",  bc);
         Row("tau_E",            s.tau_E_s,             "%.2f","s", Col::CYAN);
+
+        // ── Confinement regime (L/H) ─────────────────────────────────────────
+        ImGui::TextColored(Col::GREY,"%-22s","Confinement Regime");ImGui::SameLine();
+        ImGui::TextColored(s.h_mode?Col::GREEN:Col::AMBER,"%-12s",
+                           s.h_mode?"H-MODE":"L-MODE");
+        ImGui::SameLine();ImGui::TextColored(Col::GREY,"H98=%.2f",s.H98_factor);
+        Row("L-H Threshold",    s.P_LH_MW,             "%.1f","MW",Col::CYAN);
+        float P_heat=s.alpha_power_MW+s.P_aux_actual_MW+s.P_ohm_MW;
+        float lh_frac=(s.P_LH_MW>0.1f)?P_heat/s.P_LH_MW:0.f;
+        ImGui::TextColored(Col::GREY," P_heat/P_LH");ImGui::SameLine(150.f);
+        Bar(std::min(lh_frac*0.5f,1.f),pw*0.30f,
+            s.h_mode?Col::GREEN_DIM:Col::AMBER,Col::GREEN,0.5f);
+        ImGui::SameLine();ImGui::TextColored(s.h_mode?Col::GREEN:Col::AMBER,"%.2f",lh_frac);
+
+        // ── Sawtooth activity ────────────────────────────────────────────────
+        if(s.sawtooth_period_s>0.f){
+            ImGui::TextColored(Col::GREY,"%-22s","Sawteeth (q0<1)");ImGui::SameLine();
+            ImGui::TextColored(Col::AMBER,"ACTIVE  q0=%.2f  T=%.1fs  n=%d",
+                               s.q0_estimate,s.sawtooth_period_s,s.sawtooth_count);
+        } else {
+            Row("q0 (on-axis)", s.q0_estimate,         "%.2f","",
+                s.q0_estimate<1.f?Col::AMBER:Col::GREEN);
+        }
+
+        // ── ELM activity (H-mode edge crashes) ───────────────────────────────
+        //  Amber when unmitigated Type-I ELMs exceed ~2 MJ per crash (tile
+        //  erosion territory); green when pellet pacing keeps them small.
+        if(s.elm_freq_Hz>0.f){
+            ImGui::TextColored(Col::GREY,"%-22s","ELMs (Type-I)");ImGui::SameLine();
+            ImVec4 ec = s.elm_paced ? Col::GREEN
+                      : (s.elm_size_MJ>2.f ? Col::AMBER : Col::GREY);
+            ImGui::TextColored(ec,"%.1f Hz  dW=%.1f MJ  n=%d%s",
+                               s.elm_freq_Hz,s.elm_size_MJ,s.elm_count,
+                               s.elm_paced?"  [PACED]":"");
+            if(!s.elm_paced && s.elm_size_MJ>2.f)
+                ImGui::TextColored(Col::AMBER,
+                    "  raise pellet freq above %.1f Hz to pace ELMs",s.elm_freq_Hz);
+        }
+
+        // ── Runaway electron beam (disruption aftermath) ─────────────────────
+        if(s.re_beam_MA>0.1f){
+            ImGui::TextColored(Col::RED,"%-22s%.2f MA  ⚡ RUNAWAY BEAM",
+                               "RE Beam",s.re_beam_MA);
+        }
+        if(s.re_wall_strike){
+            ImGui::TextColored(Col::RED,"  RE WALL STRIKE (%d this campaign) — check first wall",
+                               s.re_strike_count);
+        }
+
         Row("He Ash",           s.helium_fraction*100.f,"%.2f","%");
         Row("Impurities",       s.impurity_fraction*100.f,"%.2f","%",
             s.impurity_fraction>0.05f?Col::AMBER:Col::GREY);
@@ -565,8 +633,17 @@ static void TabOverview(const ReactorState& s,
         Hdr("POWER BALANCE");
         Row("Fusion Power",   s.fusion_power_MW,  "%.1f","MW");
         Row("Alpha Heating",  s.alpha_power_MW,   "%.1f","MW",Col::AMBER);
-        Row("Aux Heating",    s.sp_aux_heat_MW,   "%.1f","MW",Col::AMBER);
-        Row("Radiated Power", s.radiated_power_MW,"%.1f","MW",Col::GREY);
+        Row("Aux Heating",    s.P_aux_actual_MW,  "%.1f","MW",Col::AMBER);
+        Row("Ohmic Heating",  s.P_ohm_MW,         "%.2f","MW",Col::AMBER);
+        Row("Loop Voltage",   s.loop_voltage_V,   "%.2f","V", Col::CYAN);
+        Row("Bremsstrahlung", s.P_brem_MW,        "%.1f","MW",Col::GREY);
+        Row("Synchrotron",    s.P_sync_MW,        "%.2f","MW",Col::GREY);
+        Row("Line Radiation", s.P_line_MW,        "%.1f","MW",
+            s.P_line_MW>0.5f*(s.alpha_power_MW+s.P_aux_actual_MW+s.P_ohm_MW+0.1f)
+            ?Col::RED:Col::GREY);
+        Row("Conduction",     s.P_cond_MW,        "%.1f","MW",Col::GREY);
+        Row("dW/dt",          s.dW_dt_MW,         "%+.1f","MW",
+            s.dW_dt_MW>=0.f?Col::GREEN:Col::AMBER);
         Row("Q scientific",   s.Q_scientific,     "%.3f","");
         Row("Blanket Heat",   s.blanket_heat_MW,  "%.1f","MW",Col::AMBER);
         Row("Net Electric",   s.net_electric_MW,  "%.1f","MW",Col::YELLOW);
@@ -577,6 +654,12 @@ static void TabOverview(const ReactorState& s,
         Row("B_T",          s.B_toroidal_T,    "%.3f","T");
         Row("Coil Current", s.coil_current_kA, "%.1f","kA");
         Row("CS Current",   s.cs_current_kA,   "%.1f","kA", Col::CYAN);
+        // CS volt-second budget — the pulse-length clock of the discharge.
+        Row("CS Flux Left", s.cs_flux_remaining_Wb, "%.1f","Wb",
+            s.cs_flux_exhausted?Col::RED
+            :(s.cs_flux_remaining_Wb<20.f?Col::AMBER:Col::GREEN));
+        if(s.cs_flux_exhausted)
+            ImGui::TextColored(Col::RED,"  CS EXHAUSTED — non-inductive drive only");
         Row("Magnet Temp",  s.magnet_temp_K,   "%.2f","K",
             s.magnet_temp_K>6.f?Col::AMBER:Col::GREEN);
         Lamp(" QUENCH ",s.quench_detected);
@@ -588,9 +671,21 @@ static void TabOverview(const ReactorState& s,
         Row("TBR",             s.tbr_current,         "%.3f", "",
             s.tbr_current >= 1.0f ? Col::GREEN : Col::AMBER);
 
+        Hdr("FIRST WALL");
+        Row("Wall Temp",     s.first_wall_temp_K,        "%.0f","K",
+            s.first_wall_temp_K>1200.f?Col::RED
+            :(s.first_wall_temp_K>800.f?Col::AMBER:Col::GREEN));
+        Row("Neutron Load",  s.neutron_wall_load_MW_m2,  "%.3f","MW/m2",Col::CYAN);
+        // Displacement damage — the campaign-lifetime wear meter.  ITER's
+        // first wall is rated for ~3 dpa before replacement.
+        Row("Damage",        s.fw_dpa,                   "%.4f","dpa",
+            s.fw_dpa>3.f?Col::RED:(s.fw_dpa>1.f?Col::AMBER:Col::GREY));
+
         Hdr("PLASMA TRENDS");
         ImGui::TextColored(Col::GREY," Fusion Power [MW]");Plot("##op",h_pfus,pw*.55f,40.f,Col::GREEN);
         ImGui::TextColored(Col::GREY," Te [keV]");         Plot("##ote",h_te,pw*.55f,40.f,Col::AMBER);
+        ImGui::TextColored(Col::GREY," Ti [keV]  (watch for sawteeth)");
+                                                            Plot("##oti",h_ti,pw*.55f,40.f,Col::ORANGE);
         ImGui::TextColored(Col::GREY," ne [e20 m-3]");     Plot("##one",h_ne,pw*.55f,40.f,Col::CYAN);
         ImGui::TextColored(Col::GREY," q95");              Plot("##oq",h_q, pw*.55f,40.f,qc);
     }
@@ -635,6 +730,297 @@ static void TabOverview(const ReactorState& s,
         if(!any)ImGui::TextColored(Col::GREEN,"  No active alarms");
         ImGui::Spacing();
         ImGui::TextColored(Col::GREY,"  See ALARMS tab for full details + remediation");
+    }
+    ImGui::EndChild();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// OP SPACE TAB — live POPCON operating-space diagram
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+//  The classic reactor-design plot: density (y) vs ion temperature (x), with
+//  the required auxiliary power P_aux(n,T) shaded at every point, the
+//  operating limits overlaid (Greenwald density, Troyon beta, L-H power
+//  threshold), and the LIVE operating point tracing a breadcrumb trail as
+//  the operator drives the discharge.  Computed with exactly the same
+//  ConfinementPhysics functions as the simulation itself, so what you see
+//  is what the plasma feels.
+//
+//    GREEN region   : ignition (P_aux ≤ 0 — the plasma self-heats)
+//    BLUE → AMBER   : increasing auxiliary power required for steady state
+//    RED line       : Greenwald density limit
+//    MAGENTA curve  : Troyon β_N = 2.5 limit
+//    CYAN dots      : L→H transition boundary (Martin 2008)
+//
+static void TabOpSpace(const ReactorState& s)
+{
+    using namespace ConfinementPhysics;
+
+    constexpr int   NX = 56, NY = 44;
+    constexpr float T_MIN = 1.f,    T_MAX = 40.f;     // ion temp [keV]
+    constexpr float N_MIN = 0.05f,  N_MAX = 2.5f;     // density [1e20 m-3]
+
+    // ── Cached P_aux(n,T) map — recomputed when the machine point moves ────
+    static float paux_map[NY][NX];
+    static float lh_map  [NY][NX];      // P_heat − P_LH (sign → boundary)
+    static float q10_map [NY][NX];      // P_fus − 10·P_aux (Q=10 contour)
+    static float c_Ip=-1.f, c_B=-1.f, c_k=-1.f, c_d=-1.f, c_Zeff=-1.f, c_imp=-1.f;
+    static int   frame_cnt=0;
+
+    TokamakGeometry g;
+    g.R_major_m=s.R_out_m; g.a_minor_m=2.0f;
+    g.kappa=std::clamp(s.kappa,1.0f,2.5f);
+    g.B_toroidal_T=std::max(s.B_toroidal_T,0.01f);
+    g.I_plasma_MA=std::max(s.plasma_current_MA,0.5f);
+    float Z_eff = 1.0f + 4.0f*s.helium_fraction
+                + (s.impurity_fraction>0?10.0f*s.impurity_fraction:0.0f);
+    float f_DT  = std::max(1.0f-s.helium_fraction-s.impurity_fraction,0.0f);
+
+    bool stale = (fabsf(c_Ip-g.I_plasma_MA)>0.05f)||(fabsf(c_B-g.B_toroidal_T)>0.02f)
+               ||(fabsf(c_k-g.kappa)>0.01f)||(fabsf(c_d-s.delta)>0.01f)
+               ||(fabsf(c_Zeff-Z_eff)>0.02f)||(fabsf(c_imp-s.impurity_fraction)>0.002f)
+               ||(++frame_cnt>240);
+    if(stale){
+        frame_cnt=0; c_Ip=g.I_plasma_MA; c_B=g.B_toroidal_T; c_k=g.kappa;
+        c_d=s.delta; c_Zeff=Z_eff; c_imp=s.impurity_fraction;
+        float V=plasmaVolume(g), S=plasmaSurfaceArea(g);
+        for(int iy=0;iy<NY;iy++){
+            float n20=N_MIN+(N_MAX-N_MIN)*(iy+0.5f)/NY;
+            float ne=n20*1e20f;
+            float nD=0.5f*ne*f_DT, nT=0.5f*ne*f_DT;     // 50:50 D-T map
+            float P_LH=martinLHThreshold(ne,g.B_toroidal_T,S);
+            for(int ix=0;ix<NX;ix++){
+                float T=T_MIN+(T_MAX-T_MIN)*(ix+0.5f)/NX;   // assume Te=Ti on map
+                float W_MJ=1.5f*ne*(2.f*T)*1.602176634e-16f*V*1e-6f;
+                //  Same profile-peaking factors as solvePowerBalance so the
+                //  map matches what the live plasma actually experiences.
+                float P_fus=fusionPowerDensity(nD,nT,T)*2.5f*V*1e-6f;
+                float P_a  =P_fus*(3.521f/17.589f);
+                float P_ohm=ohmicHeating(g,g.I_plasma_MA,T,Z_eff).P_ohm_MW;
+                float P_rad=(bremSStrahlung(ne,T,Z_eff)*1.4f
+                            +synchrotron(ne,T,g.B_toroidal_T)
+                            +lineRadiationDensity(ne,T,s.impurity_fraction,
+                                                  0.001f*s.impurity_fraction))*V*1e-6f;
+                // Fixed-point iterate P_aux: τ_E depends on total heating
+                float P_aux=10.f;
+                for(int it=0;it<5;it++){
+                    float P_loss=std::max(P_a+P_ohm+std::max(P_aux,0.f),0.5f);
+                    float tau=ipb98y2(g,P_loss,ne*1e-19f,2.5f,1.0f); // H-mode map
+                    float P_cond=(tau>1e-4f)?W_MJ/tau:1e6f;
+                    P_aux=P_cond+P_rad-P_a-P_ohm;
+                }
+                paux_map[iy][ix]=P_aux;
+                lh_map  [iy][ix]=(P_a+P_ohm+std::max(P_aux,0.f))-P_LH;
+                q10_map [iy][ix]=P_fus-10.f*std::max(P_aux,0.01f);
+            }
+        }
+    }
+
+    // ── Layout: canvas left, regime/ledger panel right ──────────────────────
+    float pw=ImGui::GetContentRegionAvail().x;
+    float ph=ImGui::GetContentRegionAvail().y;
+
+    if(ImGui::BeginChild("##ops_canvas",{pw*0.62f,0.f},false)){
+        Hdr("OPERATING SPACE  (POPCON)");
+        ImGui::TextColored(Col::GREY,
+            " Steady-state P_aux required at each (T_i, n_e) for the CURRENT machine point");
+        ImGui::TextColored(Col::GREY,
+            " I_p=%.1f MA  B_T=%.2f T  kappa=%.2f  delta=%.2f  Z_eff=%.2f",
+            g.I_plasma_MA,g.B_toroidal_T,g.kappa,s.delta,Z_eff);
+
+        ImVec2 p0=ImGui::GetCursorScreenPos();
+        ImVec2 avail=ImGui::GetContentRegionAvail();
+        float ML=52.f, MB=30.f, MT=8.f, MR=14.f;
+        float cw=std::max(avail.x-ML-MR,120.f);
+        float chh=std::max(avail.y-MT-MB-4.f,120.f);
+        ImVec2 o={p0.x+ML,p0.y+MT};                  // plot origin (top-left)
+        auto X=[&](float T){return o.x+cw*(T-T_MIN)/(T_MAX-T_MIN);};
+        auto Y=[&](float n20){return o.y+chh*(1.f-(n20-N_MIN)/(N_MAX-N_MIN));};
+        ImDrawList* dl=ImGui::GetWindowDrawList();
+
+        // Heatmap cells
+        float dx=cw/NX, dy=chh/NY;
+        for(int iy=0;iy<NY;iy++)for(int ix=0;ix<NX;ix++){
+            float pa=paux_map[iy][ix];
+            ImU32 col;
+            if(pa<=0.f){                                   // ignition
+                float d=std::clamp(-pa/100.f,0.f,1.f);
+                col=ImGui::ColorConvertFloat4ToU32({0.05f+0.15f*d,0.45f+0.45f*d,0.12f+0.2f*d,1.f});
+            } else if(pa<150.f){
+                float d=pa/150.f;
+                col=ImGui::ColorConvertFloat4ToU32({0.06f+0.5f*d,0.10f+0.30f*d,0.28f*(1.f-d)+0.04f,1.f});
+            } else {
+                col=ImGui::ColorConvertFloat4ToU32({0.10f,0.05f,0.05f,1.f});
+            }
+            float x=o.x+ix*dx, y=o.y+chh-(iy+1)*dy;
+            dl->AddRectFilled({x,y},{x+dx+0.5f,y+dy+0.5f},col);
+        }
+
+        // Q=10 contour (yellow dots at sign changes) & L-H boundary (cyan)
+        for(int iy=0;iy<NY;iy++)for(int ix=1;ix<NX;ix++){
+            float xm=o.x+ix*dx, ym=o.y+chh-(iy+0.5f)*dy;
+            if(q10_map[iy][ix-1]*q10_map[iy][ix]<0.f)
+                dl->AddCircleFilled({xm,ym},1.6f,IM_COL32(230,230,60,255));
+            if(lh_map[iy][ix-1]*lh_map[iy][ix]<0.f)
+                dl->AddCircleFilled({xm,ym},1.6f,IM_COL32(60,220,220,255));
+        }
+        for(int ix=0;ix<NX;ix++)for(int iy=1;iy<NY;iy++){
+            float xm=o.x+(ix+0.5f)*dx, ym=o.y+chh-iy*dy;
+            if(q10_map[iy-1][ix]*q10_map[iy][ix]<0.f)
+                dl->AddCircleFilled({xm,ym},1.6f,IM_COL32(230,230,60,255));
+            if(lh_map[iy-1][ix]*lh_map[iy][ix]<0.f)
+                dl->AddCircleFilled({xm,ym},1.6f,IM_COL32(60,220,220,255));
+        }
+
+        // Greenwald limit (horizontal red line)
+        float nG=g.I_plasma_MA/(3.14159265f*g.a_minor_m*g.a_minor_m);
+        if(nG>N_MIN&&nG<N_MAX)
+            dl->AddLine({o.x,Y(nG)},{o.x+cw,Y(nG)},IM_COL32(235,50,50,255),2.f);
+
+        // Troyon beta_N = 2.5 curve: n20(T) with T_sum = 2T
+        {
+            constexpr float MU0=1.256637e-6f;
+            ImVec2 prev{-1,-1};
+            for(int ix=0;ix<=64;ix++){
+                float T=T_MIN+(T_MAX-T_MIN)*ix/64.f;
+                float beta_lim=2.5f*g.I_plasma_MA/(100.f*g.a_minor_m*g.B_toroidal_T);
+                float n=beta_lim*g.B_toroidal_T*g.B_toroidal_T
+                        /(MU0*(2.f*T)*1.602e-16f)*1e-20f;
+                if(n>N_MIN&&n<N_MAX){
+                    ImVec2 pt{X(T),Y(n)};
+                    if(prev.x>0)dl->AddLine(prev,pt,IM_COL32(220,70,220,255),2.f);
+                    prev=pt;
+                }else prev={-1,-1};
+            }
+        }
+
+        // Breadcrumb trail of the live operating point (sampled ~4 Hz)
+        static std::deque<ImVec2> trail;   // data coords (T_i, n20)
+        static double last_t=-1.0;
+        if(s.time_s<last_t) last_t=-1.0;   // sim clock reset (COLD RESTART)
+        if(s.time_s-last_t>0.25){
+            last_t=s.time_s;
+            if(s.plasma_status!=PlasmaStatus::Cold
+             &&s.plasma_status!=PlasmaStatus::Quenched){
+                //  Clamp into the plotted range so a cold/edge operating
+                //  point renders ON the frame border rather than outside
+                //  it (an unclamped just-initiated plasma at T≈0, n≈0
+                //  mapped to a spot beyond the bottom-left corner).
+                float Tc=std::clamp(s.ion_temp_keV,T_MIN,T_MAX);
+                float nc=std::clamp((float)(s.plasma_density_m3*1e-20),N_MIN,N_MAX);
+                trail.push_back({Tc,nc});
+            } else trail.clear();
+            while(trail.size()>240)trail.pop_front();
+        }
+        for(size_t i=1;i<trail.size();i++){
+            float a=0.15f+0.85f*(float)i/trail.size();
+            dl->AddLine({X(trail[i-1].x),Y(trail[i-1].y)},
+                        {X(trail[i].x),  Y(trail[i].y)},
+                        ImGui::ColorConvertFloat4ToU32({0.95f,0.95f,0.95f,a}),1.5f);
+        }
+        if(!trail.empty()){
+            ImVec2 c{X(trail.back().x),Y(trail.back().y)};
+            dl->AddCircle(c,6.f,IM_COL32(255,255,255,255),12,2.f);
+            dl->AddLine({c.x-10,c.y},{c.x+10,c.y},IM_COL32(255,255,255,180),1.f);
+            dl->AddLine({c.x,c.y-10},{c.x,c.y+10},IM_COL32(255,255,255,180),1.f);
+        }
+
+        // Axes + frame + tick labels
+        dl->AddRect({o.x,o.y},{o.x+cw,o.y+chh},IM_COL32(70,110,70,255));
+        char lbl[32];
+        for(int T=5;T<=40;T+=5){
+            snprintf(lbl,32,"%d",T);
+            dl->AddText({X((float)T)-6,o.y+chh+4},IM_COL32(140,160,140,255),lbl);
+        }
+        dl->AddText({o.x+cw*0.5f-40,o.y+chh+16},IM_COL32(140,160,140,255),"T_i [keV]");
+        for(float n=0.5f;n<N_MAX;n+=0.5f){
+            snprintf(lbl,32,"%.1f",n);
+            dl->AddText({o.x-34,Y(n)-7},IM_COL32(140,160,140,255),lbl);
+        }
+        dl->AddText({p0.x,o.y-2},IM_COL32(140,160,140,255),"n_e");
+        dl->AddText({p0.x,o.y+12},IM_COL32(140,160,140,255),"e20");
+
+        ImGui::Dummy({avail.x,chh+MB+MT});
+        ImGui::TextColored(Col::GREEN, " GREEN = ignition");ImGui::SameLine();
+        ImGui::TextColored({0.9f,0.9f,0.3f,1.f}," YELLOW = Q=10");ImGui::SameLine();
+        ImGui::TextColored(Col::CYAN,  " CYAN = L-H");ImGui::SameLine();
+        ImGui::TextColored(Col::RED,   " RED = Greenwald");ImGui::SameLine();
+        ImGui::TextColored({0.86f,0.3f,0.86f,1.f}," MAGENTA = Troyon");
+    }
+    ImGui::EndChild();
+    ImGui::SameLine();
+
+    // ── Right column: regime + live power ledger ────────────────────────────
+    if(ImGui::BeginChild("##ops_right",{0.f,0.f},false)){
+        (void)ph;
+        Hdr("CONFINEMENT REGIME");
+        ImGui::TextColored(s.h_mode?Col::GREEN:Col::AMBER,"  %s",
+                           s.h_mode?"H-MODE (H98=1.00)":"L-MODE (H98=0.55)");
+        Row("P_LH (Martin 08)",s.P_LH_MW,"%.1f","MW",Col::CYAN);
+        float P_heat=s.alpha_power_MW+s.P_aux_actual_MW+s.P_ohm_MW;
+        Row("P_heat total",    P_heat,   "%.1f","MW",Col::AMBER);
+        ImGui::TextColored(Col::GREY,
+            s.h_mode?"  Back-transition below %.1f MW":"  Transition above %.1f MW",
+            s.h_mode?0.5f*s.P_LH_MW:s.P_LH_MW);
+
+        Hdr("POWER LEDGER [MW]");
+        float rw=ImGui::GetContentRegionAvail().x;
+        float maxP=std::max({s.alpha_power_MW,s.P_aux_actual_MW,s.P_ohm_MW,
+                             s.P_brem_MW,s.P_sync_MW,s.P_line_MW,s.P_cond_MW,10.f});
+        auto Ledger=[&](const char* n,float v,ImVec4 c){
+            ImGui::TextColored(Col::GREY,"%-10s",n);ImGui::SameLine(84.f);
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram,c);
+            ImGui::ProgressBar(std::clamp(v/maxP,0.f,1.f),{rw*0.52f,11.f},"");
+            ImGui::PopStyleColor();
+            ImGui::SameLine();ImGui::TextColored(c,"%6.1f",v);
+        };
+        ImGui::TextColored(Col::GREEN," SOURCES");
+        Ledger("alpha",   s.alpha_power_MW,  Col::GREEN);
+        Ledger("aux H&CD",s.P_aux_actual_MW, Col::GREEN_DIM);
+        Ledger("ohmic",   s.P_ohm_MW,        Col::GREEN_DIM);
+        ImGui::TextColored(Col::RED," SINKS");
+        Ledger("brems",   s.P_brem_MW, Col::ORANGE);
+        Ledger("synchro", s.P_sync_MW, Col::ORANGE);
+        Ledger("line rad",s.P_line_MW, s.P_line_MW>P_heat?Col::RED:Col::ORANGE);
+        Ledger("conduct", s.P_cond_MW, Col::AMBER);
+        ImGui::Spacing();
+        Row("dW/dt", s.dW_dt_MW, "%+.1f","MW",
+            s.dW_dt_MW>=0.f?Col::GREEN:Col::AMBER);
+        Row("Stored W", s.stored_energy_GJ*1000.f, "%.0f","MJ",Col::CYAN);
+
+        Hdr("OPERATING LIMITS");
+        auto LimitBar=[&](const char* n,float frac,const char* txt){
+            ImGui::TextColored(Col::GREY,"%-12s",n);ImGui::SameLine(96.f);
+            ImVec4 c=frac>1.f?Col::RED:frac>0.85f?Col::AMBER:Col::GREEN;
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram,c);
+            ImGui::ProgressBar(std::clamp(frac,0.f,1.f),{rw*0.45f,11.f},"");
+            ImGui::PopStyleColor();
+            ImGui::SameLine();ImGui::TextColored(c,"%s",txt);
+        };
+        char b1[24],b2[24],b3[24];
+        snprintf(b1,24,"%.2f/1.00",s.greenwald_frac);
+        snprintf(b2,24,"%.2f/2.50",s.beta_N);
+        float qfrac=(s.q_safety>0.01f)?2.0f/s.q_safety:0.f;
+        snprintf(b3,24,"q95=%.2f",s.q_safety);
+        LimitBar("Greenwald",s.greenwald_frac,b1);
+        LimitBar("Troyon bN",s.beta_N/2.5f,b2);
+        LimitBar("Kink (q>2)",qfrac,b3);
+
+        Hdr("SAWTOOTH / CORE MHD");
+        Row("q0 estimate",s.q0_estimate,"%.2f","",
+            s.q0_estimate<1.f?Col::AMBER:Col::GREEN);
+        if(s.sawtooth_period_s>0.f){
+            ImGui::TextColored(Col::AMBER,"  SAWTEETH ACTIVE  period %.1f s",
+                               s.sawtooth_period_s);
+            Row("Crash count",(float)s.sawtooth_count,"%.0f","");
+        } else {
+            ImGui::TextColored(Col::GREY,"  quiescent core (q0 > 1)");
+        }
+        ImGui::Spacing();
+        ImGui::TextColored(Col::GREY,
+            " Tip: raise I_p to lift the Greenwald line and\n"
+            " widen the map; raise B_T to relax Troyon; pay\n"
+            " the L-H toll (cyan) before pushing for burn.");
     }
     ImGui::EndChild();
 }
@@ -912,16 +1298,24 @@ static void TabMoltenSalt(MoltenSaltSystem& salt, TurbineSystem& turbines)
         Lamp(" LO LEVEL",s.cold_tank.lo_level_alarm);
 
         Hdr("BLANKET CIRC PUMPS");
+        ImGui::TextColored(Col::GREY," Blanket outlet: %.0f K  (target ~900 K)",
+                           s.blanket_outlet_K);
         for(int i=0;i<2;i++){
             auto& p=s.blanket_circ[i];
             ImGui::PushID(i+2000);
             ImGui::TextColored(p.running?Col::GREEN:Col::GREY," BCP-%d: %s  %.0f kg/s",
                                i+1,p.running?"RUN":"STOP",p.flow_kg_s);
             float bw=(cw-16.f)*.5f;
-            if(GreenBtn("Start",{bw,0.f})){p.running=true;p.speed_frac=1.f;}ImGui::SameLine();
-            if(RedBtn("Stop",{bw,0.f}))p.running=false;
+            if(GreenBtn("Start",{bw,0.f})){p.running=true;p.speed_frac=1.f;p.auto_start=false;}ImGui::SameLine();
+            if(RedBtn("Stop",{bw,0.f})){p.running=false;p.auto_start=false;}
+            ImGui::Checkbox("AUTO (hold 900 K outlet)",&p.auto_start);
             ImGui::SetNextItemWidth(cw-16.f);
-            ImGui::SliderFloat("##bcps",&p.speed_frac,0.f,1.f,"Speed: %.0f%%");
+            //  The slider edits the 0-1 fraction but must DISPLAY percent —
+            //  the old format string printed the raw fraction, so 100%
+            //  speed showed as "Speed: 1%".
+            float bcp_pct = p.speed_frac * 100.f;
+            if(ImGui::SliderFloat("##bcps",&bcp_pct,0.f,100.f,"Speed: %.0f%%"))
+                { p.speed_frac = bcp_pct / 100.f; p.auto_start = false; }
             ImGui::PopID();
         }
     }
@@ -980,10 +1374,13 @@ static void TabMoltenSalt(MoltenSaltSystem& salt, TurbineSystem& turbines)
             ImGui::TextColored(p.running?Col::GREEN:Col::GREY," %s",hnames[i]);
             ImGui::TextColored(Col::GREY,"   %.0f kg/s  %.2f MW",p.flow_kg_s,p.power_MW);
             float bw=(pw*.34f-16.f)*.5f;
-            if(GreenBtn("Start",{bw,0.f})){p.running=true;p.speed_frac=1.f;}ImGui::SameLine();
-            if(RedBtn("Stop",{bw,0.f}))p.running=false;
+            if(GreenBtn("Start",{bw,0.f})){p.running=true;p.speed_frac=1.f;p.auto_start=false;}ImGui::SameLine();
+            if(RedBtn("Stop",{bw,0.f})){p.running=false;p.auto_start=false;}
+            ImGui::SameLine();ImGui::Checkbox("AUTO",&p.auto_start);
             ImGui::SetNextItemWidth(pw*.34f-16.f);
-            ImGui::SliderFloat("##hls",&p.speed_frac,0.f,1.f,"%.0f%%");
+            float hl_pct = p.speed_frac * 100.f;   // display %, store fraction
+            if(ImGui::SliderFloat("##hls",&hl_pct,0.f,100.f,"%.0f%%"))
+                { p.speed_frac = hl_pct / 100.f; p.auto_start = false; }
             ImGui::PopID();
         }
 
@@ -994,10 +1391,13 @@ static void TabMoltenSalt(MoltenSaltSystem& salt, TurbineSystem& turbines)
             ImGui::TextColored(p.running?Col::GREEN:Col::GREY," CL-%d (SG%d return)",i+1,i+1);
             ImGui::TextColored(Col::GREY,"   %.0f kg/s",p.flow_kg_s);
             float bw=(pw*.34f-16.f)*.5f;
-            if(GreenBtn("Start",{bw,0.f})){p.running=true;p.speed_frac=1.f;}ImGui::SameLine();
-            if(RedBtn("Stop",{bw,0.f}))p.running=false;
+            if(GreenBtn("Start",{bw,0.f})){p.running=true;p.speed_frac=1.f;p.auto_start=false;}ImGui::SameLine();
+            if(RedBtn("Stop",{bw,0.f})){p.running=false;p.auto_start=false;}
+            ImGui::SameLine();ImGui::Checkbox("AUTO",&p.auto_start);
             ImGui::SetNextItemWidth(pw*.34f-16.f);
-            ImGui::SliderFloat("##cls",&p.speed_frac,0.f,1.f,"%.0f%%");
+            float cl_pct = p.speed_frac * 100.f;   // display %, store fraction
+            if(ImGui::SliderFloat("##cls",&cl_pct,0.f,100.f,"%.0f%%"))
+                { p.speed_frac = cl_pct / 100.f; p.auto_start = false; }
             ImGui::PopID();
         }
     }
@@ -1035,7 +1435,10 @@ static void TabHelium(HeliumCoolingSystem& he)
             if(GreenBtn("Start",{bw,0.f})){p.running=true;p.speed_frac=1.f;}ImGui::SameLine();
             if(RedBtn("Stop",{bw,0.f}))p.running=false;
             ImGui::SetNextItemWidth(cw-16.f);
-            ImGui::SliderFloat("##rps",&p.speed_frac,0.f,1.f,"Speed: %.0f%%");
+            //  Edit the 0-1 fraction, display percent (was "Speed: 1%" at full)
+            float he_pct = p.speed_frac * 100.f;
+            if(ImGui::SliderFloat("##rps",&he_pct,0.f,100.f,"Speed: %.0f%%"))
+                p.speed_frac = he_pct / 100.f;
             ImGui::PopID();
         }
         Hdr("AUX HEAT EXCHANGERS");
@@ -1182,6 +1585,21 @@ static void TabHCD(ReactorState& s, HCDSystem& hcd)
             total_cd / std::max(0.01f, s.plasma_current_MA) > 0.5f ? Col::GREEN : Col::AMBER);
         ImGui::TextColored(Col::GREY,"  (Fraction of I_p: %.0f%%)",
             100.f * total_cd / std::max(0.01f, s.plasma_current_MA));
+        // ── CS flux budget: why non-inductive current matters ────────────────
+        ImVec4 fxc = s.cs_flux_exhausted ? Col::RED
+                   : (s.cs_flux_remaining_Wb < 20.f ? Col::AMBER : Col::GREEN);
+        Row("CS Flux Left", s.cs_flux_remaining_Wb, "%.1f", "Wb", fxc);
+        if(s.cs_flux_exhausted)
+            ImGui::TextColored(Col::RED, "  FLUX EXHAUSTED — I_p held by CD only");
+
+        if(s.nbi_shinethrough_block && s.hcd_nbi_on){
+            ImGui::Spacing();
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextColored(Col::AMBER,
+                "  ⚠ NBI SHINE-THROUGH INTERLOCK: n_e < 1.5e19 m-3 — beams "
+                "blocked until the plasma is dense enough to stop them.");
+            ImGui::PopTextWrapPos();
+        }
 
         Hdr("FAULTS");
         Lamp(" NBI ",  hcd.nbiFault());
@@ -1254,8 +1672,11 @@ static void TabHCD(ReactorState& s, HCDSystem& hcd)
     renderSystem("NBI",  s.hcd_nbi_on,  s.hcd_nbi_setpoint_MW,
                  s.hcd_nbi_actual_MW, 16.5f,
                  "Neutral Beam Injection. 1 MeV deuterium neutrals, 16.5 MW "
-                 "(3 injectors × 5.5 MW). Heats ions; co-current drive ~1 MA.",
-                 hcd.nbiFault(), hcd.nbiReady(), hcd.nbiWarmupRemaining());
+                 "(3 injectors × 5.5 MW). Heats ions; co-current drive ~1 MA. "
+                 "Interlocked on n_e > 1.5e19 (shine-through protection).",
+                 hcd.nbiFault(),
+                 hcd.nbiReady() && !s.nbi_shinethrough_block,
+                 hcd.nbiWarmupRemaining());
 
     renderSystem("ICRH", s.hcd_icrh_on, s.hcd_icrh_setpoint_MW,
                  s.hcd_icrh_actual_MW, 20.0f,
@@ -1400,10 +1821,19 @@ static void TabVacuumDM(ReactorState& s, VacuumVesselSystem& vac,
         }
 
         Hdr("AUTO-MGI");
-        bool auto_mgi = false;  // pulled from DMConfig (not exposed in state)
-        ImGui::Checkbox("Enable auto-MGI on q_95 < 1.8", &auto_mgi);
-        if(auto_mgi) dm.enableAutoMGI(true);
-        else         dm.enableAutoMGI(false);
+        //  The checkbox binds to state.dm_auto_mgi (persistent).  It used
+        //  to bind to a local `bool auto_mgi = false` recreated every
+        //  frame, so it rendered unticked and immediately disabled
+        //  auto-MGI again — enabling it was impossible.
+        ImGui::Checkbox("Enable auto-MGI (fires on disruption or q_95 < 1.8)",
+                        &s.dm_auto_mgi);
+        if(s.dm_auto_mgi && !s.mgi_armed)
+            ImGui::TextColored(Col::AMBER, "  ⚠ Auto-MGI needs MGI ARMED to fire");
+        if(s.dm_injected_impurity > 0.001f)
+            ImGui::TextColored(Col::RED, "  RADIATOR IN VESSEL: %.1f%% (pumping out)",
+                               s.dm_injected_impurity*100.f);
+        if(s.dm_mitigated)
+            ImGui::TextColored(Col::CYAN, "  Current quench under mitigation control");
 
         Hdr("MITIGATION STATUS");
         Row("Active", dm.active()?1.f:0.f, dm.active()?"YES":"no", "",
@@ -1770,7 +2200,7 @@ int main(int,char**)
     for(auto& p:salt.saltState().blanket_circ){p.running=true;p.speed_frac=1.f;}
 
     // History buffers
-    ScrollBuf h_pfus,h_te,h_ne,h_q,h_elec,h_freq;
+    ScrollBuf h_pfus,h_te,h_ti,h_ne,h_q,h_elec,h_freq;
 
     // Plasma visualization (spatial diagnostics for the 3 new tabs)
     PlasmaViz plasmaviz;
@@ -1876,9 +2306,16 @@ int main(int,char**)
                 heSystem.update(state,sim);
 
                 sim.advance();
+                //  Mirror the simulation clock into ReactorState.  The
+                //  time_s field existed but was never advanced, so anything
+                //  keyed off it (the OP SPACE breadcrumb trail sampler) saw
+                //  a clock frozen at 0.0 and only ever fired once — the
+                //  crosshair sat welded to its very first sample.
+                state.time_s = sim.total_s;
             }
             h_pfus.push(state.fusion_power_MW);
             h_te  .push(state.electron_temp_keV);
+            h_ti  .push(state.ion_temp_keV);
             h_ne  .push((float)(state.plasma_density_m3*1e-20));
             h_q   .push(state.q_safety);
             h_elec.push(state.net_electric_MW);
@@ -2115,6 +2552,23 @@ int main(int,char**)
                 "active — consider reducing T_e setpoint.",
                 AlarmSeverity::Warning);
 
+            // Runaway electron beam / wall strike.
+            snprintf(cause_buf, sizeof(cause_buf),
+                "Runaway electron activity: beam current %.2f MA, wall "
+                "strikes this campaign: %d.  An unmitigated fast current "
+                "quench avalanche-converted plasma current into a "
+                "relativistic electron beam.",
+                state.re_beam_MA, state.re_strike_count);
+            alarms.trip("Runaway electrons", state.alarm_runaway, sim.total_s,
+                cause_buf,
+                "The RE beam forms during UNMITIGATED disruptions above "
+                "~4 MA.  Prevention: keep MGI/SPI armed (VACUUM & DM tab) "
+                "with auto-MGI enabled — the injected impurities raise the "
+                "density and collisionally kill the avalanche.  After a "
+                "wall strike, check the first-wall temperature before "
+                "re-initiating.",
+                AlarmSeverity::Critical);
+
             // Turbine trips (per unit)
             for(int i=0;i<4;i++){
                 char lbl[32];
@@ -2162,13 +2616,14 @@ int main(int,char**)
         //    13 = TRITIUM      — TES / detritiation / accountancy
         //    14 = OPERATIONS   — startup/shutdown procedures with checklists
         //    15 = ALARMS       — full alarm list with cause + remediation
+        //    16 = OP SPACE     — live POPCON operating-space diagram
         static const char* tab_labels[]={
             "OVERVIEW","TURBINE 1","TURBINE 2","TURBINE 3","TURBINE 4",
             "ELEC GRID","MOLTEN SALT","HELIUM",
             "TEMP MAP","FUSION HIST","PARTICLES",
-            "H&CD","VACUUM&DM","TRITIUM","OPERATIONS","ALARMS"
+            "H&CD","VACUUM&DM","TRITIUM","OPERATIONS","ALARMS","OP SPACE"
         };
-        constexpr int N_TABS = 16;
+        constexpr int N_TABS = 17;
         if(ImGui::BeginTabBar("##main")){
             for(int i=0;i<N_TABS;i++){
                 // ── Per-tab style-color stack management ─────────────────────────
@@ -2195,14 +2650,14 @@ int main(int,char**)
                         col_push_count += 2;
                     }
                 }
-                // Highlight the three plasma-viz tabs in cyan
-                if(i>=8&&i<=10){
+                // Highlight the three plasma-viz tabs (and OP SPACE) in cyan
+                if((i>=8&&i<=10)||i==16){
                     ImGui::PushStyleColor(ImGuiCol_TabHovered,{0.10f,0.35f,0.40f,1.f});
                     ImGui::PushStyleColor(ImGuiCol_TabActive,{0.06f,0.25f,0.30f,1.f});
                     col_push_count += 2;
                 }
-                // Round 4 new tabs in amber
-                if(i>=11){
+                // Round 4 new tabs in amber (OP SPACE keeps the cyan above)
+                if(i>=11&&i<=15){
                     ImGui::PushStyleColor(ImGuiCol_TabHovered,{0.40f,0.30f,0.10f,1.f});
                     ImGui::PushStyleColor(ImGuiCol_TabActive,{0.30f,0.22f,0.08f,1.f});
                     col_push_count += 2;
@@ -2229,7 +2684,7 @@ int main(int,char**)
 
         // Tab content
         switch(active_tab){
-            case 0: TabOverview(state,h_pfus,h_te,h_ne,h_q,alarms,sim); break;
+            case 0: TabOverview(state,h_pfus,h_te,h_ti,h_ne,h_q,alarms,sim); break;
             case 1: case 2: case 3: case 4:
                 TabTurbine(turbines.unit(active_tab-1),egrid,active_tab-1); break;
             case 5: TabGrid(egrid,turbines); break;
@@ -2246,6 +2701,8 @@ int main(int,char**)
             case 13: TabTritiumPlant(state, tritiumplant); break;
             case 14: TabOperations(state, sim); break;
             case 15: TabAlarms(alarms); break;
+            // ── OP SPACE: live POPCON operating-space diagram ────────────────
+            case 16: TabOpSpace(state); break;
         }
         ImGui::End();
 

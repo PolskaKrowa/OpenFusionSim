@@ -27,7 +27,8 @@ struct FuelConfig {
     float fuelling_efficiency  = 0.25f;   // fraction that enters plasma core
 
     // Pellet injector
-    float max_pellet_freq_Hz  = 10.0f;    // max injection frequency [Hz]
+    float max_pellet_freq_Hz  = 20.0f;    // max injection frequency [Hz]
+                                          // (>natural ELM freq = pacing mode)
     float pellet_mass_g       = 0.05e-3f; // mass per pellet [g]  (50 μg typical)
     float pellet_efficiency   = 0.80f;    // fraction deposited in core
 

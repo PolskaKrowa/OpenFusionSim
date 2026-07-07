@@ -148,6 +148,26 @@ void HeliumSystem::updateDivertorThermal(ReactorState& state, float dt)
     // Tile temperature: Q_dot = P_tile / A → dT/dt = P_tile / C_heat
     divertor_temp_K_ += (P_tile_MW * 1e6f / cfg_.tile_heat_capacity) * dt;
 
+    // ── ELM heat pulses ──────────────────────────────────────────────────────
+    //  The plasma core deposits each ELM crash's energy here as an impulsive
+    //  load.  Unlike the steady P_div above, an ELM arrives in ~250 µs on a
+    //  narrow wetted strike stripe — the local surface sees a much higher
+    //  energy density than the assembly-average heat capacity suggests.  The
+    //  ELM_PEAKING factor models that localization: a full-burn unmitigated
+    //  Type-I ELM (~8 MJ) spikes the strike point by ~1000 K, which is why
+    //  the operator should pace ELMs with the pellet injector before pushing
+    //  to full fusion power.  Impurity seeding does NOT shield against ELMs
+    //  (the pulse burns through the radiating layer) — only pacing helps.
+    if (state.elm_div_pulse_MJ > 0.0f) {
+        constexpr float ELM_PEAKING = 12.0f;
+        divertor_temp_K_ += state.elm_div_pulse_MJ * 1e6f * ELM_PEAKING
+                          / cfg_.tile_heat_capacity;
+        //  Report the pulse in this tick's divertor power so the Fuel
+        //  module's sputtering model sees the ELM erosion burst too.
+        P_tile_MW += state.elm_div_pulse_MJ / std::max(dt, 1e-6f);
+        state.elm_div_pulse_MJ = 0.0f;   // consumed
+    }
+
     // Water-cooled tiles: active cooling removes heat proportional to ΔT
     float T_coolant  = 500.0f; // K
     float UA_diver   = 2e6f;   // [W/K] heat transfer coefficient × area

@@ -82,7 +82,59 @@ private:
     //  `W_stored_MJ_ < 0.1f` test would re-initialize W every time it
     //  crashed during ramp-down — that re-init was the root cause of the
     //  "fusion power drops to 0 at ~30 MW then bounces back" bug.
-    float W_stored_MJ_ = 0.0f;
+    float W_stored_MJ_ = 0.0f;   // = W_e_MJ_ + W_i_MJ_ (kept for diagnostics)
     float T_i_keV_     = 0.0f;
     bool  W_initialized_ = false;
+
+    // ── Two-temperature channels (realism round 5) ──────────────────────────
+    //  The stored energy is now split into electron and ion channels,
+    //  coupled by Coulomb equilibration inside solvePowerBalance.
+    float W_e_MJ_ = 0.0f;
+    float W_i_MJ_ = 0.0f;
+
+    // ── L-H confinement regime with hysteresis ──────────────────────────────
+    //  h_mode_ latches true when P_heat crosses the Martin-2008 threshold
+    //  and only drops back when P_heat falls below ~half of it (the
+    //  experimentally observed H→L hysteresis).
+    bool  h_mode_ = false;
+
+    // ── Sawtooth (q₀ < 1 internal-kink) oscillator ──────────────────────────
+    float sawtooth_clock_s_ = 0.0f;
+    int   sawtooth_count_   = 0;
+
+    // ── ELM (Type-I edge-localized mode) oscillator ─────────────────────────
+    //  Runs only while h_mode_ is latched: the pedestal rebuilds over
+    //  1/f_ELM, then crashes, expelling a slice of stored energy to the
+    //  divertor.  Pellet pacing (state.pellet_frequency_Hz above the
+    //  natural frequency) raises f_ELM and shrinks each crash.
+    float elm_clock_s_ = 0.0f;
+    int   elm_count_   = 0;
+
+    // ── CS volt-second (flux swing) accounting ──────────────────────────────
+    //  The plasma consumes transformer flux at V_loop × f_inductive; when
+    //  flux_used_Wb_ reaches the budget, the ohmic drive is gone and I_p
+    //  can only be carried non-inductively (NBI/LHCD CD + bootstrap).
+    float flux_used_Wb_ = 0.0f;
+
+    // ── Runaway-electron avalanche during the current quench ────────────────
+    //  re_conv_frac_ is decided once, when the quench commits (mitigated →
+    //  0); the beam then grows in proportion to the current decayed away.
+    bool  re_seeded_    = false;
+    float re_conv_frac_ = 0.0f;
+
+    // ── Greenwald violation persistence timer ───────────────────────────────
+    //  A density-limit disruption is a radiative edge collapse that takes
+    //  seconds to develop — not an instantaneous trip wire.  We accumulate
+    //  time spent above the limit and only disrupt after sustained
+    //  violation (or immediately for a gross excursion).
+    float gw_violation_s_ = 0.0f;
+
+    // ── Disruption quench commitment ─────────────────────────────────────────
+    //  A disruption flag that persists for >100 ms (or any MGI/SPI firing)
+    //  commits the discharge to a current quench: I_p decays exponentially
+    //  (τ ≈ 100 ms mitigated, ≈ 30 ms unmitigated) until the plasma is
+    //  Quenched.  Prevents the old behaviour where a "disruption" could
+    //  flicker for a minute while the plasma burned on unharmed.
+    float disrupt_flag_s_   = 0.0f;
+    bool  quench_committed_ = false;
 };
